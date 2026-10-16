@@ -28,7 +28,7 @@ public static class FileOrganizerDisplay {
 '@
 $mode = [FileOrganizerDisplay+Mode]::new()
 $mode.Size = [Runtime.InteropServices.Marshal]::SizeOf($mode)
-if (-not [FileOrganizerDisplay]::EnumDisplaySettings($null, -1, [ref]$mode)) { throw 'Unable to read the runner desktop mode.' }
+if (-not [FileOrganizerDisplay]::EnumDisplaySettings([NullString]::Value, -1, [ref]$mode)) { throw 'Unable to read the runner desktop mode.' }
 $mode.Width = 1920
 $mode.Height = 1080
 $mode.Fields = 0x80000 -bor 0x100000
