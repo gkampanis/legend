@@ -1,5 +1,11 @@
 # The existing responsive-layout tests need a desktop wide enough for both layouts.
 $ErrorActionPreference = 'Stop'
+trap {
+    $message = $_.Exception.Message
+    $escaped = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+    Write-Output "::error title=Runner desktop setup::$escaped"
+    exit 1
+}
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;

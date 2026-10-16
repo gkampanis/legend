@@ -122,6 +122,8 @@ try {
     Write-Host 'PASS: packaged Windows GUI opened, rendered controls, responded and closed normally.'
 } catch {
     $report['error'] = $_.Exception.Message
+    $escaped = $_.Exception.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+    Write-Output "::error title=Packaged EXE verification::$escaped"
     throw
 } finally {
     $report | ConvertTo-Json | Set-Content (Join-Path $evidence 'verification.json') -Encoding utf8
