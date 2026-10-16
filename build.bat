@@ -6,6 +6,7 @@ if errorlevel 1 exit /b 1
 call .venv\Scripts\activate.bat
 python -m pip install -r requirements-build.txt
 if errorlevel 1 exit /b 1
+set FILE_ORGANIZER_REQUIRE_GUI_TESTS=1
 python -m unittest discover -s tests -v
 if errorlevel 1 exit /b 1
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name FileOrganizer main.py
