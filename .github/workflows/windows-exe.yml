@@ -1,0 +1,114 @@
+name: Windows EXE
+
+on:
+  push:
+    branches: [file-organizer]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-exe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify Windows EXE
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      FILE_ORGANIZER_REQUIRE_GUI_TESTS: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Run all automated tests, including real Tk widgets
+        run: python -m unittest discover -s tests -v
+      - name: Build standalone GUI executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name FileOrganizer main.py
+      - name: Launch packaged EXE and verify its actual Windows GUI
+        shell: pwsh
+        run: ./scripts/verify-windows-exe.ps1 -ExePath ./dist/FileOrganizer.exe -EvidenceDirectory ./build-evidence
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash ./dist/FileOrganizer.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  FileOrganizer.exe" | Set-Content ./dist/FileOrganizer.exe.sha256 -Encoding ascii
+      - name: Upload verified executable
+        id: exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileOrganizer-Windows-x64
+          path: |
+            dist/FileOrganizer.exe
+            dist/FileOrganizer.exe.sha256
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload GUI verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-GUI-verification
+          path: build-evidence/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Record artifact link
+        shell: pwsh
+        env:
+          ARTIFACT_URL: ${{ steps.exe.outputs.artifact-url }}
+        run: |
+          "### Verified Windows executable" >> $env:GITHUB_STEP_SUMMARY
+          "[Download executable artifact]($env:ARTIFACT_URL)" >> $env:GITHUB_STEP_SUMMARY
+          "Source commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+
+  release:
+    name: Publish downloadable EXE
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FileOrganizer-Windows-x64
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: Windows-GUI-verification
+          path: build-evidence
+      - name: Create release with direct EXE download
+        id: publish
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = "file-organizer-build-$env:GITHUB_RUN_NUMBER-$env:GITHUB_RUN_ATTEMPT"
+          $notes = @"
+          Αυτόνομη εφαρμογή Windows x64. Κατεβάστε το FileOrganizer.exe και ανοίξτε το χωρίς εγκατάσταση Python.
+
+          Δημιουργήθηκε από το commit $env:GITHUB_SHA σε Windows runner, μετά από αυτοματοποιημένες δοκιμές και έλεγχο εκκίνησης του τελικού GUI. Το artifact Windows-GUI-verification περιέχει screenshot και αναφορά ελέγχου.
+
+          Το εκτελέσιμο δεν έχει ψηφιακή υπογραφή. Το αρχείο FileOrganizer.exe.sha256 επιτρέπει έλεγχο ακεραιότητας.
+          "@
+          $notes | Set-Content release-notes.md -Encoding utf8
+          gh release create $tag ./dist/FileOrganizer.exe ./dist/FileOrganizer.exe.sha256 ./build-evidence/FileOrganizer-GUI.png ./build-evidence/verification.json --target $env:GITHUB_SHA --title "File Organizer · Windows · Build $env:GITHUB_RUN_NUMBER" --notes-file release-notes.md --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed. The verified EXE remains in the build artifact.' }
+          "### Download FileOrganizer.exe" >> $env:GITHUB_STEP_SUMMARY
+          "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/FileOrganizer.exe" >> $env:GITHUB_STEP_SUMMARY
+      - name: Explain unavailable release permission
+        if: steps.publish.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Warning 'Release publication failed; inspect the previous step for the exact GitHub error. The EXE is still available in FileOrganizer-Windows-x64.'
+          'Release publication failed. Download the verified EXE from the FileOrganizer-Windows-x64 artifact in this run.' >> $env:GITHUB_STEP_SUMMARY

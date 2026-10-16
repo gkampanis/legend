@@ -59,3 +59,22 @@ py -3 -m unittest discover -s tests -v
 Σε **Windows 11** με εγκατεστημένη Python, τρέξτε `build.bat`. Το script δημιουργεί virtual environment, εγκαθιστά PyInstaller, εκτελεί τις δοκιμές και παράγει `dist\FileOrganizer.exe`. Η πρώτη δημιουργία απαιτεί Internet για λήψη των εργαλείων. Ο τελικός χρήστης χρειάζεται μόνο το EXE, χωρίς Python ή σύνδεση Internet. Το PyInstaller πρέπει να τρέξει σε Windows για Windows EXE· δεν υποστηρίζεται cross-compilation από Linux. Το παραγόμενο EXE δεν έχει ψηφιακή υπογραφή και ενδέχεται να εμφανίζεται ειδοποίηση SmartScreen.
 
 Επαληθεύτηκαν 19 δοκιμές σε Linux με Python 3.13/Tk 8.6 και εικονική οθόνη, χωρίς παραλείψεις: πυρήνας, widgets, διάταξη σε στενό/ευρύ παράθυρο και αυξημένη κλίμακα. Οπτικός έλεγχος έγινε επίσης σε Tk 8.6. Η τελική εμφάνιση Segoe UI, το πραγματικό Windows display scaling (ιδίως σε πολλαπλές οθόνες), τα junctions και το παραγόμενο EXE χρειάζονται επιπλέον δοκιμή σε Windows 11.
+
+
+## Αυτόματη παραγωγή EXE στο GitHub
+
+Το workflow [Windows EXE](https://github.com/gkampanis/legend/actions/workflows/windows-exe.yml) ξεκινά αυτόματα με κάθε push στο `file-organizer` ή χειροκίνητα από το **Run workflow**. Δεν απαιτείται εγκατάσταση εργαλείων στον υπολογιστή του τελικού χρήστη.
+
+Ο runner `windows-latest` εγκαθιστά Python 3.12 x64 και το PyInstaller του `requirements-build.txt`, εκτελεί όλες τις υπάρχουσες δοκιμές (με υποχρεωτική παρουσία GUI) και χτίζει με `--onefile --windowed`. Το `scripts/verify-windows-exe.ps1` εκκινεί το ίδιο το παραγόμενο EXE, ελέγχει το Windows GUI subsystem, τον ελληνικό τίτλο, την παρουσία των controls και την απόκριση του παραθύρου, αποθηκεύει screenshot και απαιτεί κανονικό κλείσιμο με κωδικό εξόδου 0. Δεν σαρώνει ή μετακινεί αρχεία. Ένας άδειος ή μη λειτουργικός έλεγχος δεν επιτρέπει δημοσίευση EXE.
+
+Μετά από επιτυχή επαλήθευση διατίθενται:
+
+- **FileOrganizer-Windows-x64**: Actions artifact με `FileOrganizer.exe` και SHA-256 checksum, διαθέσιμο για 90 ημέρες.
+- **Windows-GUI-verification**: screenshot του πραγματικού EXE και αναφορά JSON, διαθέσιμα για 30 ημέρες.
+- **GitHub Release**, εφόσον επιτρέπεται `contents: write`: το EXE, το checksum και τα στοιχεία επαλήθευσης ως απευθείας assets. Κάθε εκτέλεση έχει μοναδικό tag `file-organizer-build-<run_number>-<run_attempt>` και το Release σημειώνεται ως latest. Αν η δημοσίευση Release αποτύχει, το επαληθευμένο EXE παραμένει στο Actions artifact και το σφάλμα φαίνεται στο βήμα δημοσίευσης.
+
+Όταν έχει δημοσιευτεί επιτυχώς Release, ο σταθερός σύνδεσμος είναι:
+
+[Λήψη FileOrganizer.exe](https://github.com/gkampanis/legend/releases/latest/download/FileOrganizer.exe)
+
+Κατεβάστε και ανοίξτε το EXE: δεν χρειάζεται Python ή εκτέλεση scripts. Το αρχείο παραμένει χωρίς ψηφιακή υπογραφή. Το screenshot του runner είναι στοιχείο οπτικού ελέγχου, ενώ οι δοκιμές ελέγχουν τις αλληλεπιδράσεις του GUI. Ο Windows runner χρησιμοποιεί Windows Server· η τελική εμφάνιση σε κάθε ρύθμιση Windows 11 μπορεί να διαφέρει.
