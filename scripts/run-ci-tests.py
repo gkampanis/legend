@@ -2,6 +2,7 @@
 import io
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -18,7 +19,15 @@ def main():
     evidence = ROOT / 'build-evidence'
     evidence.mkdir(exist_ok=True)
     stream = io.StringIO()
-    result = unittest.TextTestRunner(stream=stream, verbosity=2).run(unittest.defaultTestLoader.discover('tests'))
+    # Windows defaults to AppData/Local/Temp, correctly excluded by the app.
+    # Keep fixtures in the workspace without weakening any exclusion or assertion.
+    previous_temp = tempfile.tempdir
+    try:
+        with tempfile.TemporaryDirectory(prefix='test-fixtures-', dir=evidence) as fixtures:
+            tempfile.tempdir = fixtures
+            result = unittest.TextTestRunner(stream=stream, verbosity=2).run(unittest.defaultTestLoader.discover('tests'))
+    finally:
+        tempfile.tempdir = previous_temp
     output = stream.getvalue()
     print(output)
     (evidence / 'test-results.txt').write_text(output, encoding='utf-8')

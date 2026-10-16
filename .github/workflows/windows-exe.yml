@@ -30,6 +30,9 @@ jobs:
           cache-dependency-path: requirements-build.txt
       - name: Install build dependencies
         run: python -m pip install -r requirements-build.txt
+      - name: Prepare runner desktop for responsive GUI tests
+        shell: pwsh
+        run: ./scripts/prepare-windows-desktop.ps1
       - name: Run all automated tests, including real Tk widgets
         run: python scripts/run-ci-tests.py
       - name: Build standalone GUI executable

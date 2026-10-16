@@ -65,12 +65,12 @@ py -3 -m unittest discover -s tests -v
 
 Το workflow [Windows EXE](https://github.com/gkampanis/legend/actions/workflows/windows-exe.yml) ξεκινά αυτόματα με κάθε push στο `file-organizer` ή χειροκίνητα από το **Run workflow**. Δεν απαιτείται εγκατάσταση εργαλείων στον υπολογιστή του τελικού χρήστη.
 
-Ο runner `windows-latest` εγκαθιστά Python 3.12 x64 και το PyInstaller του `requirements-build.txt`, εκτελεί όλες τις υπάρχουσες δοκιμές (με υποχρεωτική παρουσία GUI) και χτίζει με `--onefile --windowed`. Το `scripts/verify-windows-exe.ps1` εκκινεί το ίδιο το παραγόμενο EXE, ελέγχει το Windows GUI subsystem, τον ελληνικό τίτλο, την παρουσία των controls και την απόκριση του παραθύρου, αποθηκεύει screenshot και απαιτεί κανονικό κλείσιμο με κωδικό εξόδου 0. Δεν σαρώνει ή μετακινεί αρχεία. Ένας άδειος ή μη λειτουργικός έλεγχος δεν επιτρέπει δημοσίευση EXE.
+Ο runner `windows-latest` εγκαθιστά Python 3.12 x64 και το PyInstaller του `requirements-build.txt`, ρυθμίζει την εικονική οθόνη σε 1920×1080, εκτελεί όλες τις υπάρχουσες δοκιμές (με υποχρεωτική παρουσία GUI και προσωρινά δεδομένα εκτός AppData) και χτίζει με `--onefile --windowed`. Το `scripts/verify-windows-exe.ps1` εκκινεί το ίδιο το παραγόμενο EXE, ελέγχει το Windows GUI subsystem, τον ελληνικό τίτλο, την παρουσία των controls και την απόκριση του παραθύρου, αποθηκεύει screenshot και απαιτεί κανονικό κλείσιμο με κωδικό εξόδου 0. Δεν σαρώνει ή μετακινεί αρχεία. Ένας άδειος ή μη λειτουργικός έλεγχος δεν επιτρέπει δημοσίευση EXE.
 
 Μετά από επιτυχή επαλήθευση διατίθενται:
 
 - **FileOrganizer-Windows-x64**: Actions artifact με `FileOrganizer.exe` και SHA-256 checksum, διαθέσιμο για 90 ημέρες.
-- **Windows-GUI-verification**: screenshot του πραγματικού EXE και αναφορά JSON, διαθέσιμα για 30 ημέρες.
+- **Windows-GUI-verification**: screenshot του πραγματικού EXE, αναφορά JSON και αναλυτικό αποτέλεσμα δοκιμών, διαθέσιμα για 30 ημέρες. Σε αποτυχία πριν το build διατίθενται όσα διαγνωστικά έχουν παραχθεί.
 - **GitHub Release**, εφόσον επιτρέπεται `contents: write`: το EXE, το checksum και τα στοιχεία επαλήθευσης ως απευθείας assets. Κάθε εκτέλεση έχει μοναδικό tag `file-organizer-build-<run_number>-<run_attempt>` και το Release σημειώνεται ως latest. Αν η δημοσίευση Release αποτύχει, το επαληθευμένο EXE παραμένει στο Actions artifact και το σφάλμα φαίνεται στο βήμα δημοσίευσης.
 
 Όταν έχει δημοσιευτεί επιτυχώς Release, ο σταθερός σύνδεσμος είναι:
