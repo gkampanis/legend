@@ -121,3 +121,15 @@ The Product Owner supplied a production diagnostic XML_ROOT=string. A bounded st
 There is no extra authorization/preflight endpoint call. Own-client credentials omit entityVatNumber; only explicit representative mode adds it. UI/help/error messages now state this clearly, and the direct HTTP test asserts one request.
 
 Validation: 75 tests discovered; 71 passed, 4 skipped without a display (3 GUI, 1 native Windows DPAPI). Compileall, smoke demo and diff checks passed. Prior v0.3 GUI validation with Xvfb remains recorded separately; no new native Windows or live AADE verification is claimed.
+
+## Follow-up v0.4.0 — direct provider PDF retrieval
+
+The user confirmed actual production metadata synchronization (144 invoices and one change in their screenshot). This supersedes earlier uncertainty about local API synchronization, but does not establish live provider-download compatibility.
+
+Implemented a separate credential-free PDF downloader using the exact official downloadingInvoiceUrl. It accepts public HTTPS/443 destinations and validates redirect destinations, rejects private DNS results, bounds redirects/response bytes, and does not solve challenges. HTML/challenge/HTTP/invalid-PDF outcomes remain explicit per-invoice pending states. PDF structure is checked with pinned pypdf 6.10.0; saved files remain saved_unverified because document-content identity is not independently compared. OCR is planned for electronic archiving/search, not a download gate.
+
+Files use client VAT/environment, review folder, date, supplier and MARK with a unique suffix. Exclusive creation avoids overwriting files. Staging files are removed on failure/cancellation; completed files remain. Size/SHA-256/source hash determine repeat-download skipping; missing or changed files are downloaded again. Cancellation waits for the current blocking network read (30s socket timeout); the 90s streaming deadline is checked between reads, not a hard process deadline. Encrypted PDFs and more than 500 pages are deferred. DNS checks do not pin the TLS connection address; this is not a fully isolated arbitrary-URL fetch sandbox.
+
+SQLite schema 3 adds attempt history only, backing up schema 1/2 before upgrade. The GUI has a background download action, folder chooser per batch, progress/cancellation and per-invoice states. INSTALL.bat installs the one free PDF dependency in the project venv. No OCR, browser automation, EXE or releases added.
+
+Validation on Linux/Xvfb: 85 tests discovered, 84 passed, one native Windows DPAPI test skipped. Added PDF tests use generated synthetic PDFs/fake network responses and cover repeat download/hash changes, missing files, challenge/HTML/fake PDF, size bound, cancellation, cleanup on database error, migration/backup, client/cancellation exclusion, private URL/redirect refusal and HTTP failure stream cleanup. Existing GUI, synchronization and parser tests passed. Offline demo, compileall and diff checks passed. No native Windows execution or live provider PDF download has been performed.

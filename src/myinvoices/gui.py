@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 import unicodedata
 from datetime import datetime
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 
 from .api import Environment, RequestDocsAPI
 from .demo import DemoAPI
@@ -14,6 +14,7 @@ from .diagnostics import record_failure
 from .models import ApplicationError, Credentials
 from .local_check import check_client
 from .sync import Synchronizer
+from .pdf_downloads import PDFDownloader, LABELS
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -42,7 +43,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.3.1 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.4.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -65,7 +66,7 @@ class App:
         ttk.Label(outer, text=title, font=("Segoe UI", 17, "bold")).pack(anchor="w")
         notice = ("OFFLINE DEMO: συνθετικά στοιχεία, χωρίς σύνδεση ή λήψη PDF."
                   if self.demo else
-                  "Στοιχεία και σύνδεση ανά πελάτη · Έλεγχος API χωρίς αποθήκευση παραστατικών · PDF: δεν υλοποιήθηκε ακόμη.")
+                  "Στοιχεία και σύνδεση ανά πελάτη · Έλεγχος API χωρίς αποθήκευση παραστατικών · PDF: απευθείας λήψη σε φάκελο προς έλεγχο.")
         ttk.Label(outer, text=notice, wraplength=1050).pack(anchor="w", pady=(4, 10))
         if self.demo:
             ttk.Label(outer, text="Για ενεργά πεδία API: κλείστε το demo και ανοίξτε START_MYINVOICES.bat.",
@@ -85,6 +86,8 @@ class App:
         self.stop_button = ttk.Button(bar, text="Διακοπή", command=self._stop, state="disabled")
         self.stop_button.pack(side="left", padx=6)
         ttk.Label(outer, text="Τα API credentials και το περιβάλλον ορίζονται στα στοιχεία κάθε πελάτη.").pack(anchor="w", pady=10)
+        self.pdf_button = ttk.Button(outer, text="Λήψη διαθέσιμων PDF επιλεγμένου πελάτη", command=self._download_pdfs)
+        self.pdf_button.pack(anchor="w", pady=(0, 8))
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True)
         left, right = ttk.Frame(body), ttk.Frame(body)
@@ -220,7 +223,7 @@ class App:
 
     def _set_busy(self, value):
         self.busy = value
-        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.search_entry, self.previous, self.next):
+        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.pdf_button, self.search_entry, self.previous, self.next):
             widget.configure(state="disabled" if value else "normal")
         self.client_tree.configure(selectmode="none" if value else "browse")
         if value:
@@ -255,7 +258,10 @@ class App:
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
-                if kind == "progress":
+                if kind == "pdf_progress":
+                    done, total = payload
+                    self.status.set(f"Έλεγχος συνδέσμων PDF: {done} / {total}")
+                elif kind == "progress":
                     pages, records = payload
                     self.status.set(f"Αποθηκευμένες σελίδες: {pages} · Εγγραφές που επεξεργάστηκαν: {records}")
                 elif kind == "done":
@@ -328,7 +334,7 @@ class App:
                 row["issue_date"], row["mark"], row["issuer_vat"] or "Άγνωστο",
                 f'{row["series"] or ""} / {row["number"] or ""}',
                 row["total"] if row["total"] is not None else "—",
-                "Ακυρωμένο (myDATA)" if row["cancelled"] else STATUS[row["status"]]),
+                "Ακυρωμένο (myDATA)" if row["cancelled"] else LABELS.get(row["pdf_state"], STATUS[row["status"]])),
                 tags=("cancelled",) if row["cancelled"] else ())
         self.history_tree.delete(*self.history_tree.get_children())
         for row in events:
@@ -388,6 +394,33 @@ class App:
             label = "Διακόπηκε με ασφάλεια" if result.cancelled else "Ο συγχρονισμός ολοκληρώθηκε"
             self._message(f"{label} · Σελίδες: {result.pages} · Εγγραφές που επεξεργάστηκαν: {result.records}. "
                             "Δεν έγινε λήψη ή επαλήθευση PDF.")
+        self._submit(work, done)
+        self.stop_button.configure(state="normal")
+
+    def _download_pdfs(self):
+        if self.busy or not self.selected:
+            return
+        if self.demo:
+            self._message("Το demo δεν πραγματοποιεί λήψεις από παρόχους.")
+            return
+        destination = filedialog.askdirectory(title="Επιλέξτε φάκελο αποθήκευσης PDF", parent=self.root)
+        if not destination:
+            return
+        client = self.clients[self.selected]
+        self.cancel.clear()
+        def work():
+            self.operation_stage = "pdf"
+            result = PDFDownloader(self.db).run(client, destination, self.cancel,
+                lambda done, total: self.queue.put(("pdf_progress", (done, total))))
+            return result, self._view(client.id, self.offset)
+        def done(payload):
+            result, view = payload
+            self._display(view)
+            label = "Η λήψη διακόπηκε" if result['cancelled'] else "Η λήψη ολοκληρώθηκε"
+            self._message(f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
+                f"Εκκρεμή: {result['pending']}. Φάκελος: {destination}. "
+                "Τα PDF είναι ΠΡΟΣ_ΕΛΕΓΧΟ: δεν έχει επαληθευτεί η ταυτότητα του παραστατικού. "
+                "Cloudflare/CAPTCHA δεν παρακάμπτονται.")
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 

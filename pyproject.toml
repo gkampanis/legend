@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "myinvoices-starter"
-version = "0.3.1"
+version = "0.4.0"
 description = "Local Greek desktop starter with offline-tested myDATA synchronization"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pypdf==6.10.0"]
 
 [project.scripts]
 myinvoices = "myinvoices.__main__:main"

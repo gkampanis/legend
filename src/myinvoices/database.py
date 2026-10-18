@@ -54,6 +54,18 @@ PRAGMA user_version = 2;
 """
 
 
+PDF_SCHEMA = """
+CREATE TABLE IF NOT EXISTS pdf_attempts (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ client_id TEXT NOT NULL, mark INTEGER NOT NULL, state TEXT NOT NULL,
+ source_hash TEXT NOT NULL, path TEXT, sha256 TEXT, byte_count INTEGER NOT NULL DEFAULT 0,
+ at TEXT NOT NULL, FOREIGN KEY(client_id,mark) REFERENCES invoices(client_id,mark)
+);
+CREATE INDEX IF NOT EXISTS pdf_invoice_idx ON pdf_attempts(client_id,mark,id DESC);
+PRAGMA user_version=3;
+"""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -68,14 +80,14 @@ class Database:
                 tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
                 if tables:
                     raise ApplicationError("Η βάση δεν ανήκει σε αυτή την έκδοση του myInvoices.")
-                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + EXTENSION + "\nCOMMIT;")
-            elif version == 1:
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + EXTENSION + PDF_SCHEMA + "\nCOMMIT;")
+            elif version in (1, 2):
                 # Additive migration only, with a separate consistent SQLite backup first.
                 required = {"clients", "invoices", "checkpoints", "events", "continuation_history"}
                 tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if not required <= tables:
                     raise ApplicationError("Μη αναμενόμενη δομή βάσης· δεν έγινε αναβάθμιση.")
-                with tempfile.NamedTemporaryFile(prefix=self.path.stem + "-schema1-backup-",
+                with tempfile.NamedTemporaryFile(prefix=self.path.stem + f"-schema{version}-backup-",
                                                   suffix=".sqlite3", dir=self.path.parent, delete=False) as file:
                     backup_path = Path(file.name)
                 backup = sqlite3.connect(backup_path)
@@ -85,8 +97,8 @@ class Database:
                         raise ApplicationError("Δεν επαληθεύτηκε το αντίγραφο ασφαλείας. Δεν έγινε αναβάθμιση.")
                 finally:
                     backup.close()
-                conn.executescript("BEGIN IMMEDIATE;\n" + EXTENSION + "\nCOMMIT;")
-            elif version != 2:
+                conn.executescript("BEGIN IMMEDIATE;\n" + EXTENSION + PDF_SCHEMA + "\nCOMMIT;")
+            elif version != 3:
                 raise ApplicationError("Μη υποστηριζόμενη έκδοση βάσης δεδομένων.")
 
     @contextmanager
@@ -241,7 +253,7 @@ class Database:
     def invoices(self, client_id, offset=0, limit=200):
         with self.connection() as conn:
             return [dict(r) for r in conn.execute(
-                """SELECT i.*, EXISTS(SELECT 1 FROM document_changes c
+                """SELECT i.*, (SELECT p.state FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_state, EXISTS(SELECT 1 FROM document_changes c
                     WHERE c.client_id=i.client_id AND c.invoice_mark=i.mark AND c.kind='cancellation') AS cancelled
                     FROM invoices i WHERE client_id=? ORDER BY issue_date DESC, mark DESC LIMIT ? OFFSET ?""",
                 (client_id, limit, offset))]
@@ -264,3 +276,22 @@ class Database:
         with self.connection() as conn:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM events WHERE client_id=? ORDER BY id DESC LIMIT ?", (client_id, limit))]
+
+    def download_candidates(self, client_id):
+        with self.connection() as conn:
+            return [dict(r) for r in conn.execute("""SELECT i.mark,i.issue_date,i.issuer_vat,i.download_url
+                FROM invoices i WHERE i.client_id=? AND i.download_url IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM document_changes c WHERE c.client_id=i.client_id
+                AND c.invoice_mark=i.mark AND c.kind='cancellation') ORDER BY i.mark""", (client_id,))]
+
+    def saved_pdf(self, client_id, mark, source_hash):
+        with self.connection() as conn:
+            row = conn.execute("""SELECT * FROM pdf_attempts WHERE client_id=? AND mark=?
+                AND source_hash=? AND state='saved_unverified' ORDER BY id DESC LIMIT 1""",
+                (client_id, mark, source_hash)).fetchone()
+            return dict(row) if row else None
+
+    def record_pdf(self, client_id, mark, state, source_hash, path=None, sha256=None, byte_count=0):
+        with self.connection() as conn:
+            conn.execute("""INSERT INTO pdf_attempts(client_id,mark,state,source_hash,path,sha256,byte_count,at)
+                VALUES (?,?,?,?,?,?,?,?)""", (client_id,mark,state,source_hash,path,sha256,byte_count,now()))
