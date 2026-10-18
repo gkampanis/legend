@@ -8,6 +8,7 @@ import tempfile
 import uuid
 import xml.etree.ElementTree as ET
 
+from .date_range import DateRange
 from .models import ApplicationError, Checkpoint, Client, SyncError
 
 SCHEMA = """
@@ -66,6 +67,23 @@ PRAGMA user_version=3;
 """
 
 
+PERIOD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS period_checkpoints (
+ client_id TEXT NOT NULL REFERENCES clients(id), date_from TEXT NOT NULL, date_to TEXT NOT NULL,
+ cursor INTEGER NOT NULL DEFAULT 0, query_mark INTEGER NOT NULL DEFAULT 0,
+ highwater INTEGER NOT NULL DEFAULT 0, partition_key TEXT, row_key TEXT,
+ active INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(client_id,date_from,date_to)
+);
+CREATE TABLE IF NOT EXISTS period_continuation_history (
+ client_id TEXT NOT NULL REFERENCES clients(id), date_from TEXT NOT NULL, date_to TEXT NOT NULL,
+ token_hash TEXT NOT NULL, PRIMARY KEY(client_id,date_from,date_to,token_hash)
+);
+CREATE INDEX IF NOT EXISTS invoices_date_idx ON invoices(client_id,issue_date DESC,mark DESC);
+PRAGMA user_version=4;
+"""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -80,8 +98,8 @@ class Database:
                 tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
                 if tables:
                     raise ApplicationError("Η βάση δεν ανήκει σε αυτή την έκδοση του myInvoices.")
-                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + EXTENSION + PDF_SCHEMA + "\nCOMMIT;")
-            elif version in (1, 2):
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + EXTENSION + PDF_SCHEMA + PERIOD_SCHEMA + "\nCOMMIT;")
+            elif version in (1, 2, 3):
                 # Additive migration only, with a separate consistent SQLite backup first.
                 required = {"clients", "invoices", "checkpoints", "events", "continuation_history"}
                 tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -97,8 +115,8 @@ class Database:
                         raise ApplicationError("Δεν επαληθεύτηκε το αντίγραφο ασφαλείας. Δεν έγινε αναβάθμιση.")
                 finally:
                     backup.close()
-                conn.executescript("BEGIN IMMEDIATE;\n" + EXTENSION + PDF_SCHEMA + "\nCOMMIT;")
-            elif version != 3:
+                conn.executescript("BEGIN IMMEDIATE;\n" + EXTENSION + PDF_SCHEMA + PERIOD_SCHEMA + "\nCOMMIT;")
+            elif version != 4:
                 raise ApplicationError("Μη υποστηριζόμενη έκδοση βάσης δεδομένων.")
 
     @contextmanager
@@ -161,7 +179,8 @@ class Database:
                 if client["environment"] != environment:
                     state = conn.execute("SELECT revision FROM checkpoints WHERE client_id=?", (client_id,)).fetchone()
                     count = conn.execute("SELECT count(*) FROM invoices WHERE client_id=?", (client_id,)).fetchone()[0]
-                    if count or state[0]:
+                    periods = conn.execute("SELECT count(*) FROM period_checkpoints WHERE client_id=? AND revision>0", (client_id,)).fetchone()[0]
+                    if count or state[0] or periods:
                         raise ApplicationError("Ο πελάτης έχει ήδη συγχρονισμένα δεδομένα. Προσθέστε ξεχωριστή εγγραφή για το άλλο περιβάλλον.")
                 conn.execute("UPDATE clients SET name=?, environment=? WHERE id=?", (name, environment, client_id))
                 conn.commit()
@@ -176,14 +195,23 @@ class Database:
             raise ApplicationError("Ο πελάτης δεν βρέθηκε.")
         return Client(**dict(row))
 
-    def checkpoint(self, client_id):
+    def checkpoint(self, client_id, period=None):
         with self.connection() as conn:
-            row = conn.execute("SELECT * FROM checkpoints WHERE client_id=?", (client_id,)).fetchone()
+            if period:
+                # Require canonical inclusive dates before creating a durable scope.
+                parsed = DateRange.parse(*period)
+                period = parsed.period
+                conn.execute("""INSERT OR IGNORE INTO period_checkpoints(client_id,date_from,date_to)
+                    VALUES (?,?,?)""", (client_id, *period))
+                row = conn.execute("""SELECT * FROM period_checkpoints
+                    WHERE client_id=? AND date_from=? AND date_to=?""", (client_id, *period)).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM checkpoints WHERE client_id=?", (client_id,)).fetchone()
         if row is None:
             raise ApplicationError("Δεν βρέθηκε πρόοδος για τον πελάτη.")
         token = (row["partition_key"], row["row_key"]) if row["active"] else None
         return Checkpoint(client_id, row["cursor"], row["query_mark"], row["highwater"],
-                          token, bool(row["active"]), row["revision"])
+                          token, bool(row["active"]), row["revision"], period)
 
     def commit_page(self, checkpoint, page):
         """Invoice writes and the next cursor commit together, or neither does."""
@@ -191,10 +219,13 @@ class Database:
         highwater = max([checkpoint.cursor, checkpoint.highwater]
                         + [invoice.mark for invoice in page.invoices]
                         + [change.event_mark for change in page.changes if change.event_mark is not None])
+        table = 'period_checkpoints' if checkpoint.period else 'checkpoints'
+        history = 'period_continuation_history' if checkpoint.period else 'continuation_history'
+        where = 'client_id=?' + (' AND date_from=? AND date_to=?' if checkpoint.period else '')
+        scope = (client.id, *(checkpoint.period or ()))
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            current = conn.execute("SELECT revision FROM checkpoints WHERE client_id=?",
-                                   (client.id,)).fetchone()
+            current = conn.execute(f"SELECT revision FROM {table} WHERE {where}", scope).fetchone()
             if current is None or current[0] != checkpoint.revision:
                 raise SyncError("Η πρόοδος άλλαξε από άλλη εργασία. Δοκιμάστε ξανά.")
             for change in page.changes:
@@ -211,7 +242,7 @@ class Database:
             if page.continuation:
                 digest = hashlib.sha256(json.dumps(page.continuation).encode()).hexdigest()
                 try:
-                    conn.execute("INSERT INTO continuation_history VALUES (?, ?)", (client.id, digest))
+                    conn.execute(f"INSERT INTO {history} VALUES ({','.join('?' for _ in (*scope, digest))})", (*scope, digest))
                 except sqlite3.IntegrityError:
                     raise SyncError("Επαναλαμβανόμενο continuation token· ο συγχρονισμός σταμάτησε.") from None
             for invoice in page.invoices:
@@ -241,26 +272,28 @@ class Database:
             else:
                 cursor, query, active = highwater, 0, 0
                 partition = row = None
-                conn.execute("DELETE FROM continuation_history WHERE client_id=?", (client.id,))
-            conn.execute("""UPDATE checkpoints SET cursor=?, query_mark=?, highwater=?,
-                            partition_key=?, row_key=?, active=?, revision=revision+1 WHERE client_id=?""",
-                         (cursor, query, highwater, partition, row, active, client.id))
+                conn.execute(f"DELETE FROM {history} WHERE {where}", scope)
+            conn.execute(f"""UPDATE {table} SET cursor=?, query_mark=?, highwater=?,
+                            partition_key=?, row_key=?, active=?, revision=revision+1 WHERE {where}""",
+                         (cursor, query, highwater, partition, row, active, *scope))
             conn.execute("INSERT INTO events(client_id, at, kind, record_count) VALUES (?, ?, ?, ?)",
-                         (client.id, now(), "page_committed", len(page.invoices) + len(page.changes)))
+                         (client.id, now(), "period_page_committed" if checkpoint.period else "page_committed", len(page.invoices) + len(page.changes)))
             conn.commit()
-        return self.checkpoint(client.id)
+        return self.checkpoint(client.id, checkpoint.period)
 
-    def invoices(self, client_id, offset=0, limit=200):
+    def invoices(self, client_id, offset=0, limit=200, dates=None):
+        clause, values = (dates or DateRange()).sql("i.issue_date")
         with self.connection() as conn:
             return [dict(r) for r in conn.execute(
                 """SELECT i.*, (SELECT p.state FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_state, EXISTS(SELECT 1 FROM document_changes c
                     WHERE c.client_id=i.client_id AND c.invoice_mark=i.mark AND c.kind='cancellation') AS cancelled
-                    FROM invoices i WHERE client_id=? ORDER BY issue_date DESC, mark DESC LIMIT ? OFFSET ?""",
-                (client_id, limit, offset))]
+                    FROM invoices i WHERE client_id=?""" + clause + " ORDER BY issue_date DESC, mark DESC LIMIT ? OFFSET ?",
+                (client_id, *values, limit, offset))]
 
-    def count(self, client_id):
+    def count(self, client_id, dates=None):
+        clause, values = (dates or DateRange()).sql()
         with self.connection() as conn:
-            return conn.execute("SELECT count(*) FROM invoices WHERE client_id=?", (client_id,)).fetchone()[0]
+            return conn.execute("SELECT count(*) FROM invoices WHERE client_id=?" + clause, (client_id, *values)).fetchone()[0]
 
     def changes(self, client_id, limit=200):
         with self.connection() as conn:
@@ -277,17 +310,18 @@ class Database:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM events WHERE client_id=? ORDER BY id DESC LIMIT ?", (client_id, limit))]
 
-    def download_candidates(self, client_id):
+    def download_candidates(self, client_id, dates=None):
+        clause, values = (dates or DateRange()).sql("i.issue_date")
         with self.connection() as conn:
             return [dict(r) for r in conn.execute("""SELECT i.mark,i.issue_date,i.issuer_vat,i.download_url
                 FROM invoices i WHERE i.client_id=? AND i.download_url IS NOT NULL
                 AND NOT EXISTS(SELECT 1 FROM document_changes c WHERE c.client_id=i.client_id
-                AND c.invoice_mark=i.mark AND c.kind='cancellation') ORDER BY i.mark""", (client_id,))]
+                AND c.invoice_mark=i.mark AND c.kind='cancellation')""" + clause + " ORDER BY i.mark", (client_id, *values))]
 
     def saved_pdf(self, client_id, mark, source_hash):
         with self.connection() as conn:
             row = conn.execute("""SELECT * FROM pdf_attempts WHERE client_id=? AND mark=?
-                AND source_hash=? AND state='saved_unverified' ORDER BY id DESC LIMIT 1""",
+                AND source_hash=? AND state IN ('saved_unverified','imported_unverified') ORDER BY id DESC LIMIT 1""",
                 (client_id, mark, source_hash)).fetchone()
             return dict(row) if row else None
 
@@ -295,3 +329,16 @@ class Database:
         with self.connection() as conn:
             conn.execute("""INSERT INTO pdf_attempts(client_id,mark,state,source_hash,path,sha256,byte_count,at)
                 VALUES (?,?,?,?,?,?,?,?)""", (client_id,mark,state,source_hash,path,sha256,byte_count,now()))
+
+    def invoice(self, client_id, mark):
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM invoices WHERE client_id=? AND mark=?", (client_id,mark)).fetchone()
+            if row is None:
+                raise ApplicationError('Επιλέξτε ένα παραστατικό.')
+            return dict(row)
+
+    def environment_editable(self, client_id):
+        with self.connection() as conn:
+            return not (conn.execute("SELECT revision FROM checkpoints WHERE client_id=?", (client_id,)).fetchone()[0]
+                or conn.execute("SELECT count(*) FROM invoices WHERE client_id=?", (client_id,)).fetchone()[0]
+                or conn.execute("SELECT count(*) FROM period_checkpoints WHERE client_id=? AND revision>0", (client_id,)).fetchone()[0])

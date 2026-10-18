@@ -1,6 +1,9 @@
 """Direct provider PDFs. No AADE credentials, challenge solving or URL guessing."""
 from datetime import date
 import hashlib
+from collections import Counter
+import webbrowser
+from http.client import HTTPException
 import ipaddress
 import os
 from pathlib import Path
@@ -16,6 +19,7 @@ from .models import ApplicationError
 
 MAX_BYTES = 40 * 1024 * 1024
 LABELS = {
+    'imported_unverified': 'PDF από browser — προς έλεγχο',
     'saved_unverified': 'PDF αποθηκευμένο — προς έλεγχο',
     'challenge': 'Εκκρεμεί: προστασία παρόχου / CAPTCHA',
     'html_page': 'Εκκρεμεί: ο σύνδεσμος επιστρέφει ιστοσελίδα',
@@ -26,6 +30,110 @@ LABELS = {
     'unsafe_url': 'Εκκρεμεί: μη επιτρεπτός σύνδεσμος',
     'storage_error': 'Εκκρεμεί: αποτυχία αποθήκευσης',
 }
+
+
+def state_label(state):
+    if state and state.startswith('http_') and state[5:].isdigit():
+        return f'Εκκρεμεί: HTTP {state[5:]} από τον πάροχο'
+    return LABELS.get(state, 'Εκκρεμεί: άγνωστη κατάσταση')
+
+
+def open_provider(database, client, mark, browser=None):
+    row = database.invoice(client.id, mark)
+    if not row['download_url']:
+        raise ApplicationError('Το παραστατικό δεν έχει επίσημο σύνδεσμο παρόχου.')
+    try:
+        validate_url(row['download_url'])
+    except Pending as error:
+        raise ApplicationError(state_label(error.state)) from None
+    if not (browser or webbrowser.open)(row['download_url'], new=2):
+        raise ApplicationError('Δεν άνοιξε ο browser. Ελέγξτε τον προεπιλεγμένο browser των Windows.')
+
+
+def review_folder(root, client, row):
+    try:
+        issued = date.fromisoformat(row['issue_date'])
+        year, month = str(issued.year), f'{issued.month:02}'
+    except ValueError:
+        year, month = 'Αγνωστη_ημερομηνία', '00'
+    supplier = ''.join(c for c in (row['issuer_vat'] or '') if c.isascii() and c.isalnum())[:32] or 'Αγνωστος'
+    folder = Path(root) / f'{client.vat}_{client.environment}' / 'ΠΡΟΣ_ΕΛΕΓΧΟ' / year / month / supplier
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def publish_pdf(temporary, folder, mark, cancel):
+    final = folder / f'{mark}_{uuid.uuid4().hex}.pdf'
+    created = False
+    interrupted = False
+    try:
+        with final.open('xb') as target:
+            created = True
+            with temporary.open('rb') as source:
+                while chunk := source.read(65536):
+                    if cancel.is_set():
+                        interrupted = True
+                        break
+                    target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        if interrupted:
+            final.unlink(missing_ok=True)
+            return None
+        return final
+    except Exception:
+        if created:
+            final.unlink(missing_ok=True)
+        raise
+
+
+def import_browser_pdf(database, client, mark, source, destination, cancel):
+    """User explicitly associates a locally downloaded PDF with the selected MARK."""
+    row = database.invoice(client.id, mark)
+    source = Path(source)
+    if source.is_symlink() or not source.is_file():
+        raise ApplicationError('Επιλέξτε ένα τοπικό αρχείο PDF, όχι σύνδεσμο ή φάκελο.')
+    temporary = final = None
+    try:
+        folder = review_folder(destination, client, row)
+        with source.open('rb') as original, tempfile.NamedTemporaryFile(dir=folder, suffix='.part', delete=False) as target:
+            temporary = Path(target.name)
+            size = 0
+            while chunk := original.read(65536):
+                if cancel.is_set():
+                    return None
+                size += len(chunk)
+                if size > MAX_BYTES:
+                    raise ApplicationError('Το PDF υπερβαίνει το όριο των 40 MB.')
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        if not valid_pdf(temporary):
+            raise ApplicationError('Το αρχείο δεν είναι έγκυρο PDF έως 500 σελίδες χωρίς κρυπτογράφηση.')
+        checksum = digest_file(temporary)
+        source_hash = hashlib.sha256((row['download_url'] or '').encode()).hexdigest()
+        old = database.saved_pdf(client.id, mark, source_hash)
+        if old and old['sha256'] == checksum:
+            old_path = Path(old['path'])
+            if old_path.is_file() and not old_path.is_symlink() and digest_file(old_path) == checksum:
+                return old_path
+        if cancel.is_set():
+            return None
+        final = publish_pdf(temporary, folder, mark, cancel)
+        if final:
+            database.record_pdf(client.id, mark, 'imported_unverified', source_hash, str(final), checksum, size)
+        return final
+    except OSError:
+        if final:
+            final.unlink(missing_ok=True)
+        raise ApplicationError('Αποτυχία ανάγνωσης ή αποθήκευσης του PDF. Το αρχικό αρχείο διατηρείται.') from None
+    except Exception:
+        if final:
+            final.unlink(missing_ok=True)
+        raise
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
 
 class Pending(Exception):
     def __init__(self, state):
@@ -41,6 +149,8 @@ def validate_url(url):
         addresses = socket.getaddrinfo(parts.hostname, 443, type=socket.SOCK_STREAM)
         if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
             raise ValueError()
+    except socket.gaierror:
+        raise Pending('network_error') from None
     except (ValueError, OSError):
         raise Pending('unsafe_url') from None
 
@@ -79,9 +189,9 @@ class PDFDownloader:
         self.db = database
         self.opener = opener or build_opener(SafeRedirect())
 
-    def run(self, client, destination, cancel, progress=lambda done, total: None):
-        rows = self.db.download_candidates(client.id)
-        result = dict(saved=0, skipped=0, pending=0, cancelled=False)
+    def run(self, client, destination, cancel, progress=lambda done, total: None, dates=None):
+        rows = self.db.download_candidates(client.id, dates)
+        result = dict(saved=0, skipped=0, pending=0, cancelled=False, reasons=Counter())
         for index, row in enumerate(rows):
             if cancel.is_set():
                 result['cancelled'] = True
@@ -110,6 +220,7 @@ class PDFDownloader:
             except Pending as error:
                 self.db.record_pdf(client.id, row['mark'], error.state, source_hash)
                 result['pending'] += 1
+                result['reasons'][error.state] += 1
             except Exception:
                 if output:
                     output[0].unlink(missing_ok=True)
@@ -127,7 +238,15 @@ class PDFDownloader:
                 response = self.opener.open(request, timeout=30)
             except HTTPError as error:
                 try:
-                    state = 'challenge' if error.headers.get('cf-mitigated') == 'challenge' else 'http_error'
+                    challenge = error.headers.get('cf-mitigated') == 'challenge'
+                    if not challenge:
+                        try:
+                            prefix = error.read(65536).lower()
+                        except (OSError, ValueError, HTTPException):
+                            prefix = b''
+                        challenge = any(marker in prefix for marker in
+                            (b'cf-chl-', b'challenge-platform', b'captcha', b'cf-turnstile'))
+                    state = 'challenge' if challenge else f'http_{error.code}'
                 finally:
                     error.close()
                 raise Pending(state) from None
@@ -135,21 +254,14 @@ class PDFDownloader:
                 if response.headers.get('cf-mitigated') == 'challenge':
                     raise Pending('challenge')
                 if getattr(response, 'status', 200) != 200:
-                    raise Pending('http_error')
+                    raise Pending(f'http_{response.status}')
                 prefix = response.read(65536)
                 lower = prefix.lower()
                 if any(marker in lower for marker in (b'cf-chl-', b'challenge-platform', b'captcha', b'cf-turnstile')) and not prefix.startswith(b'%PDF-'):
                     raise Pending('challenge')
                 if not prefix.startswith(b'%PDF-'):
                     raise Pending('html_page' if b'<html' in lower or b'<!doctype html' in lower else 'invalid_pdf')
-                try:
-                    issued = date.fromisoformat(row['issue_date'])
-                    year, month = str(issued.year), f'{issued.month:02}'
-                except ValueError:
-                    year, month = 'Αγνωστη_ημερομηνία', '00'
-                supplier = ''.join(c for c in (row['issuer_vat'] or '') if c.isascii() and c.isalnum())[:32] or 'Αγνωστος'
-                folder = root / f'{client.vat}_{client.environment}' / 'ΠΡΟΣ_ΕΛΕΓΧΟ' / year / month / supplier
-                folder.mkdir(parents=True, exist_ok=True)
+                folder = review_folder(root, client, row)
                 with tempfile.NamedTemporaryFile(dir=folder, suffix='.part', delete=False) as stream:
                     temporary = Path(stream.name)
                     size = 0
@@ -172,31 +284,13 @@ class PDFDownloader:
                 checksum = digest_file(temporary)
                 if cancel.is_set():
                     return None
-                final = folder / f'{row["mark"]}_{uuid.uuid4().hex}.pdf'
-                # Exclusive creation works on NTFS and removable FAT/exFAT disks too.
-                created = False
-                interrupted = False
-                try:
-                    with final.open('xb') as target, temporary.open('rb') as source:
-                        created = True
-                        while chunk := source.read(65536):
-                            if cancel.is_set():
-                                interrupted = True
-                                break
-                            target.write(chunk)
-                        target.flush()
-                        os.fsync(target.fileno())
-                    if interrupted:
-                        final.unlink(missing_ok=True)
-                        return None
-                except Exception:
-                    if created:
-                        final.unlink(missing_ok=True)
-                    raise
+                final = publish_pdf(temporary, folder, row['mark'], cancel)
+                if final is None:
+                    return None
                 return final, checksum, size
         except Pending:
             raise
-        except (URLError, TimeoutError, ConnectionError):
+        except (URLError, TimeoutError, ConnectionError, HTTPException):
             raise Pending('network_error') from None
         except OSError:
             raise Pending('storage_error') from None

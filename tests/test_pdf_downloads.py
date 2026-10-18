@@ -145,3 +145,69 @@ class PDFTests(unittest.TestCase):
         self.assertEqual(result['pending'],2)
         self.assertTrue(body.closed)
         self.assertFalse(list(self.root.rglob('*.pdf')))
+
+    def test_import_from_browser_preserves_original_and_prevents_duplicate(self):
+        from myinvoices.pdf_downloads import import_browser_pdf
+        source = self.root / 'browser-download.pdf'
+        source.write_bytes(self.pdf)
+        mark = self.db.download_candidates(self.client.id)[0]['mark']
+        path = import_browser_pdf(self.db,self.client,mark,source,self.root/'archive',threading.Event())
+        self.assertEqual(path.read_bytes(),self.pdf)
+        self.assertEqual(source.read_bytes(),self.pdf)
+        again = import_browser_pdf(self.db,self.client,mark,source,self.root/'archive',threading.Event())
+        self.assertEqual(path,again)
+        states = {r['mark']: r['pdf_state'] for r in self.db.invoices(self.client.id)}
+        self.assertEqual(states[mark],'imported_unverified')
+        result, _ = self.run_download(self.pdf)
+        self.assertEqual((result['saved'],result['skipped']),(1,1))
+        self.assertFalse(list(self.root.rglob('*.part')))
+
+    def test_import_rejects_html_and_rolls_back_file_on_database_failure(self):
+        from myinvoices.pdf_downloads import import_browser_pdf
+        from myinvoices.models import ApplicationError
+        source = self.root/'download.pdf'
+        source.write_bytes(b'<html>captcha</html>')
+        mark = self.db.download_candidates(self.client.id)[0]['mark']
+        with self.assertRaises(ApplicationError):
+            import_browser_pdf(self.db,self.client,mark,source,self.root/'archive',threading.Event())
+        source.write_bytes(self.pdf)
+        with patch.object(self.db,'record_pdf',side_effect=RuntimeError('synthetic')):
+            with self.assertRaises(RuntimeError):
+                import_browser_pdf(self.db,self.client,mark,source,self.root/'archive',threading.Event())
+        self.assertEqual(source.read_bytes(),self.pdf)
+        self.assertFalse(list((self.root/'archive').rglob('*.pdf')))
+        self.assertFalse(list(self.root.rglob('*.part')))
+
+    def test_browser_opens_only_selected_official_url_and_missing_url_is_safe(self):
+        from unittest.mock import Mock
+        from myinvoices.pdf_downloads import open_provider
+        from myinvoices.models import ApplicationError
+        browser = Mock(return_value=True)
+        mark = self.db.download_candidates(self.client.id)[0]['mark']
+        open_provider(self.db,self.client,mark,browser=browser)
+        browser.assert_called_once_with('https://provider.example/pdf',new=2)
+        with self.db.connection() as conn:
+            conn.execute('UPDATE invoices SET download_url=NULL WHERE client_id=? AND mark=?',(self.client.id,mark))
+        with self.assertRaises(ApplicationError):
+            open_provider(self.db,self.client,mark,browser=browser)
+        self.assertEqual(browser.call_count,1)
+
+    def test_http_reason_codes_and_body_challenges_are_distinct(self):
+        from urllib.error import HTTPError
+        for body,state in [(b'forbidden','http_403'),(b'<html>cf-chl-widget</html>','challenge')]:
+            opener = Opener(b'')
+            def fail(*args, **kwargs):
+                raise HTTPError('https://provider.example/secret-token',403,'Forbidden',{},io.BytesIO(body))
+            opener.open = fail
+            result = PDFDownloader(self.db,opener).run(self.client,self.root/'output',threading.Event())
+            self.assertEqual(dict(result['reasons']),{state:2})
+            self.assertEqual({r['pdf_state'] for r in self.db.invoices(self.client.id)},{state})
+
+    def test_date_filter_limits_pdf_requests_inclusively(self):
+        from myinvoices.date_range import DateRange
+        with self.db.connection() as conn:
+            conn.execute("UPDATE invoices SET issue_date='2025-01-01' WHERE mark=(SELECT min(mark) FROM invoices)")
+        opener = Opener(self.pdf)
+        result = PDFDownloader(self.db,opener).run(self.client,self.root/'output',threading.Event(),dates=DateRange.parse('01/01/2026','31/12/2026'))
+        self.assertEqual(result['saved'],1)
+        self.assertEqual(len(opener.requests),1)

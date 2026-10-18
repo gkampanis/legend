@@ -1,5 +1,6 @@
 import threading
 
+from .date_range import DateRange
 from .models import SyncError, SyncResult
 from .xml_parser import parse_response
 
@@ -12,19 +13,24 @@ class Synchronizer:
             raise ValueError("max_pages must be positive")
         self.max_pages = max_pages
 
-    def run(self, client_id, cancel=None, progress=None, stage=None):
+    def run(self, client_id, cancel=None, progress=None, stage=None, dates=None):
         cancel = cancel or threading.Event()
         client = self.database.client(client_id)
         if self.api.environment.name.lower() != client.environment:
             raise SyncError("Το περιβάλλον API δεν συμφωνεί με τον πελάτη.")
-        checkpoint = self.database.checkpoint(client_id)
+        dates = dates or DateRange()
+        checkpoint = self.database.checkpoint(client_id, dates.period)
         pages = records = 0
         while pages < self.max_pages:
             if cancel.is_set():
                 return SyncResult(pages, records, True)
             if stage:
                 stage("request")
-            raw = self.api.fetch(checkpoint.request_mark, checkpoint.continuation)
+            if checkpoint.period:
+                raw = self.api.fetch(checkpoint.request_mark, checkpoint.continuation,
+                                     date_from=dates.start, date_to=dates.end)
+            else:
+                raw = self.api.fetch(checkpoint.request_mark, checkpoint.continuation)
             if stage:
                 stage("xml")
             page = parse_response(raw)

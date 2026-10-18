@@ -14,7 +14,8 @@ from .diagnostics import record_failure
 from .models import ApplicationError, Credentials
 from .local_check import check_client
 from .sync import Synchronizer
-from .pdf_downloads import PDFDownloader, LABELS
+from .pdf_downloads import PDFDownloader, state_label, open_provider, import_browser_pdf
+from .date_range import DateRange
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -34,6 +35,10 @@ class App:
         self.clients = {}
         self.selected = None
         self.offset = 0
+        self.dates = DateRange()
+        self.date_from = tk.StringVar()
+        self.date_to = tk.StringVar()
+        self.visible_documents = {}
         self.total = 0
         self.last_result = None
         self.closed = False
@@ -43,7 +48,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.4.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.5.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -86,8 +91,27 @@ class App:
         self.stop_button = ttk.Button(bar, text="Διακοπή", command=self._stop, state="disabled")
         self.stop_button.pack(side="left", padx=6)
         ttk.Label(outer, text="Τα API credentials και το περιβάλλον ορίζονται στα στοιχεία κάθε πελάτη.").pack(anchor="w", pady=10)
-        self.pdf_button = ttk.Button(outer, text="Λήψη διαθέσιμων PDF επιλεγμένου πελάτη", command=self._download_pdfs)
-        self.pdf_button.pack(anchor="w", pady=(0, 8))
+        pdf_bar = ttk.Frame(outer)
+        pdf_bar.pack(fill="x", pady=(0, 8))
+        self.pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF περιόδου", command=self._download_pdfs)
+        self.pdf_button.pack(side="left")
+        self.browser_button = ttk.Button(pdf_bar, text="Άνοιγμα επιλεγμένου στον browser", command=self._open_provider)
+        self.browser_button.pack(side="left", padx=6)
+        self.import_button = ttk.Button(pdf_bar, text="Εισαγωγή PDF από browser", command=self._import_pdf)
+        self.import_button.pack(side="left")
+        date_bar = ttk.Frame(outer)
+        date_bar.pack(fill="x", pady=(0, 8))
+        ttk.Label(date_bar, text="Ημερομηνία παραστατικού · Από:").pack(side="left")
+        self.from_entry = ttk.Entry(date_bar, textvariable=self.date_from, width=13)
+        self.from_entry.pack(side="left", padx=5)
+        ttk.Label(date_bar, text="Έως:").pack(side="left")
+        self.to_entry = ttk.Entry(date_bar, textvariable=self.date_to, width=13)
+        self.to_entry.pack(side="left", padx=5)
+        self.dates_button = ttk.Button(date_bar, text="Εφαρμογή", command=self._apply_dates)
+        self.dates_button.pack(side="left")
+        self.clear_dates_button = ttk.Button(date_bar, text="Όλες οι ημερομηνίες", command=self._clear_dates)
+        self.clear_dates_button.pack(side="left", padx=5)
+        ttk.Label(date_bar, text="ΗΗ/ΜΜ/ΕΕΕΕ · ισχύει σε άντληση, προβολή και λήψη PDF").pack(side="left")
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True)
         left, right = ttk.Frame(body), ttk.Frame(body)
@@ -223,7 +247,7 @@ class App:
 
     def _set_busy(self, value):
         self.busy = value
-        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.pdf_button, self.search_entry, self.previous, self.next):
+        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.pdf_button, self.browser_button, self.import_button, self.from_entry, self.to_entry, self.dates_button, self.clear_dates_button, self.search_entry, self.previous, self.next):
             widget.configure(state="disabled" if value else "normal")
         self.client_tree.configure(selectmode="none" if value else "browse")
         if value:
@@ -290,7 +314,7 @@ class App:
             self.root.after_cancel(self.poll_id)
 
     def _view(self, client_id, offset):
-        return (self.db.invoices(client_id, offset, PAGE_SIZE), self.db.count(client_id),
+        return (self.db.invoices(client_id, offset, PAGE_SIZE, self.dates), self.db.count(client_id, self.dates),
                 self.db.checkpoint(client_id), self.db.events(client_id),
                 self.db.change_count(client_id), self.db.changes(client_id))
 
@@ -325,20 +349,23 @@ class App:
     def _display(self, view):
         rows, self.total, checkpoint, events, change_count, changes = view
         client = self.clients[self.selected]
-        pending = " · Υπάρχει συνέχεια προς άντληση" if checkpoint.active else ""
+        pending = " · Υπάρχει συνέχεια γενικού συγχρονισμού" if checkpoint.active else ""
+        period_label = (f" · Περίοδος: {self.dates.start or 'αρχή'} — {self.dates.end or 'τέλος'}"
+                        if self.dates.start or self.dates.end else " · Όλες οι ημερομηνίες")
         self.summary.set(f"{client.name} · ΑΦΜ {client.vat} · {ENVIRONMENTS[client.environment]}\n"
-                         f"Παραστατικά: {self.total} · Μεταβολές: {change_count} · Ολοκληρωμένο MARK: {checkpoint.cursor}{pending}")
+                         f"Παραστατικά: {self.total} · Μεταβολές: {change_count} · MARK γενικού συγχρονισμού: {checkpoint.cursor}{pending}{period_label}")
         self.document_tree.delete(*self.document_tree.get_children())
+        self.visible_documents = {str(row['mark']): row for row in rows}
         for row in rows:
-            self.document_tree.insert("", "end", values=(
+            self.document_tree.insert("", "end", iid=str(row['mark']), values=(
                 row["issue_date"], row["mark"], row["issuer_vat"] or "Άγνωστο",
                 f'{row["series"] or ""} / {row["number"] or ""}',
                 row["total"] if row["total"] is not None else "—",
-                "Ακυρωμένο (myDATA)" if row["cancelled"] else LABELS.get(row["pdf_state"], STATUS[row["status"]])),
+                "Ακυρωμένο (myDATA)" if row["cancelled"] else (state_label(row["pdf_state"]) if row["pdf_state"] else STATUS[row["status"]])),
                 tags=("cancelled",) if row["cancelled"] else ())
         self.history_tree.delete(*self.history_tree.get_children())
         for row in events:
-            self.history_tree.insert("", "end", values=(row["at"], "Αποθήκευση σελίδας", row["record_count"]))
+            self.history_tree.insert("", "end", values=(row["at"], "Άντληση περιόδου" if row["kind"] == "period_page_committed" else "Αποθήκευση σελίδας", row["record_count"]))
         self.changes_tree.delete(*self.changes_tree.get_children())
         for row in changes:
             self.changes_tree.insert("", "end", values=(CHANGE_LABELS[row["kind"]],
@@ -356,6 +383,16 @@ class App:
     def _sync(self):
         if self.busy or not self.selected:
             return
+        try:
+            dates = DateRange.parse(self.date_from.get(), self.date_to.get())
+            dates.period
+        except ApplicationError as error:
+            self._message(str(error), error=True)
+            return
+        if self.demo and dates.period:
+            self._message("Το demo δεν υποστηρίζει άντληση περιόδου. Επιλέξτε Όλες οι ημερομηνίες.", error=True)
+            return
+        self.dates = dates
         client = self.clients[self.selected]
         if self.demo:
             if client.vat != "000000000":
@@ -366,7 +403,8 @@ class App:
             environment = Environment[client.environment.upper()]
             if not messagebox.askyesno("Επιβεβαίωση σύνδεσης ΑΑΔΕ",
                 f"Θα γίνουν πραγματικά, μόνο αναγνωστικά αιτήματα στο {ENVIRONMENTS[client.environment]}.\n"
-                f"Πελάτης: {client.name} · ΑΦΜ: {client.vat}\n\n"
+                f"Πελάτης: {client.name} · ΑΦΜ: {client.vat}\n"
+                + (f"Περίοδος: {dates.start:%d/%m/%Y} — {dates.end:%d/%m/%Y}\n\n" if dates.period else "Όλες οι ημερομηνίες\n\n") +
                 "Θα χρησιμοποιηθούν τα αποθηκευμένα credentials του πελάτη. "
                 "Η άντληση γίνεται απευθείας με RequestDocs, χωρίς προηγούμενη κλήση ελέγχου εξουσιοδότησης. Συνέχεια;",
                 parent=self.root):
@@ -385,7 +423,7 @@ class App:
                 selected_api = RequestDocsAPI(credentials, environment)
             result = Synchronizer(self.db, selected_api).run(client_id, self.cancel,
                 lambda pages, records: self.queue.put(("progress", (pages, records))),
-                lambda stage: setattr(self, "operation_stage", stage))
+                lambda stage: setattr(self, "operation_stage", stage), dates=dates)
             return result, self._view(client_id, 0)
         def done(payload):
             result, view = payload
@@ -397,12 +435,93 @@ class App:
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 
+    def _apply_dates(self):
+        if self.busy:
+            return
+        try:
+            dates = DateRange.parse(self.date_from.get(), self.date_to.get())
+        except ApplicationError as error:
+            self._message(str(error), error=True)
+            return
+        self.dates, self.offset = dates, 0
+        if self.selected:
+            self._submit(lambda: self._view(self.selected, 0), self._display)
+
+    def _clear_dates(self):
+        if not self.busy:
+            self.date_from.set("")
+            self.date_to.set("")
+            self._apply_dates()
+
+    def _selected_document(self):
+        selection = self.document_tree.selection()
+        if len(selection) != 1:
+            self._message("Επιλέξτε ακριβώς ένα παραστατικό στη λίστα.", error=True)
+            return None
+        return self.visible_documents.get(selection[0])
+
+    def _open_provider(self):
+        if self.busy or not self.selected:
+            return
+        row = self._selected_document()
+        if row is None:
+            return
+        if self.demo:
+            self._message("Το demo δεν ανοίγει παρόχους.")
+            return
+        client = self.clients[self.selected]
+        mark = row['mark']
+        self._submit(lambda: open_provider(self.db, client, mark),
+            lambda _result: self._message(f"Άνοιξε ο browser για MARK {mark}. "
+                "Ολοκληρώστε τυχόν έλεγχο στη σελίδα και κατεβάστε το PDF. "
+                "Μετά πατήστε Εισαγωγή PDF από browser με το ίδιο παραστατικό επιλεγμένο."))
+
+    def _import_pdf(self):
+        if self.busy or not self.selected:
+            return
+        row = self._selected_document()
+        if row is None:
+            return
+        if self.demo:
+            self._message("Το demo δεν εισάγει πραγματικά PDF.")
+            return
+        client = self.clients[self.selected]
+        source = filedialog.askopenfilename(title=f"PDF για MARK {row['mark']}",
+            filetypes=[("PDF", "*.pdf")], parent=self.root)
+        if not source:
+            return
+        if not messagebox.askyesno("Αντιστοίχιση PDF", f"Πελάτης: {client.name} · ΑΦΜ {client.vat}\n"
+            f"MARK: {row['mark']} · Προμηθευτής: {row['issuer_vat'] or 'Άγνωστος'}\n"
+            f"Ημερομηνία: {row['issue_date']} · Σειρά/αριθμός: {row['series'] or ''}/{row['number'] or ''}\n\n"
+            "Το επιλεγμένο PDF αφορά αυτό το παραστατικό; Το αρχικό αρχείο θα διατηρηθεί.", parent=self.root):
+            return
+        destination = filedialog.askdirectory(title="Φάκελος αρχειοθέτησης PDF", parent=self.root)
+        if not destination:
+            return
+        self.cancel.clear()
+        def work():
+            self.operation_stage = "pdf_import"
+            path = import_browser_pdf(self.db, client, row['mark'], source, destination, self.cancel)
+            return path, self._view(client.id, self.offset)
+        def done(payload):
+            path, view = payload
+            self._display(view)
+            self._message(f"PDF για MARK {row['mark']} αποθηκεύτηκε: {path}" if path else "Η εισαγωγή διακόπηκε.")
+        self._submit(work, done)
+        self.stop_button.configure(state="normal")
+
     def _download_pdfs(self):
         if self.busy or not self.selected:
             return
         if self.demo:
             self._message("Το demo δεν πραγματοποιεί λήψεις από παρόχους.")
             return
+        try:
+            self.dates = DateRange.parse(self.date_from.get(), self.date_to.get())
+        except ApplicationError as error:
+            self._message(str(error), error=True)
+            return
+        self.offset = 0
         destination = filedialog.askdirectory(title="Επιλέξτε φάκελο αποθήκευσης PDF", parent=self.root)
         if not destination:
             return
@@ -411,16 +530,18 @@ class App:
         def work():
             self.operation_stage = "pdf"
             result = PDFDownloader(self.db).run(client, destination, self.cancel,
-                lambda done, total: self.queue.put(("pdf_progress", (done, total))))
+                lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
             return result, self._view(client.id, self.offset)
         def done(payload):
             result, view = payload
             self._display(view)
             label = "Η λήψη διακόπηκε" if result['cancelled'] else "Η λήψη ολοκληρώθηκε"
+            reasons = " · ".join(f"{state_label(state)}: {count}" for state, count in sorted(result['reasons'].items()))
             self._message(f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
                 f"Εκκρεμή: {result['pending']}. Φάκελος: {destination}. "
                 "Τα PDF είναι ΠΡΟΣ_ΕΛΕΓΧΟ: δεν έχει επαληθευτεί η ταυτότητα του παραστατικού. "
-                "Cloudflare/CAPTCHA δεν παρακάμπτονται.")
+                + (f" Αιτίες: {reasons}." if reasons else "") +
+                " Για σελίδα/CAPTCHA: επιλέξτε παραστατικό → Άνοιγμα στον browser → κατεβάστε το PDF → Εισαγωγή PDF από browser.")
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 
@@ -452,7 +573,7 @@ class App:
             return
         client = self.clients[self.selected]
         def load():
-            editable = self.db.checkpoint(client.id).revision == 0 and self.db.count(client.id) == 0
+            editable = self.db.environment_editable(client.id)
             return self.credentials.get(client), editable
         self._submit(load,
                      lambda payload: self._show_client_form(client, payload[0], environment_editable=payload[1]),

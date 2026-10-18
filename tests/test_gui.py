@@ -175,3 +175,72 @@ class GUITests(unittest.TestCase):
                 self.assertEqual(errors, [])
             finally:
                 root.destroy()
+
+    def test_date_filter_browser_and_pdf_import_workflow(self):
+        import io
+        import threading
+        import tkinter as tk
+        from unittest.mock import patch
+        from pypdf import PdfWriter
+        from myinvoices.database import Database
+        from myinvoices.demo import DemoAPI
+        from myinvoices.sync import Synchronizer
+        from myinvoices.gui import App
+        from myinvoices.pdf_downloads import PDFDownloader
+        from test_pdf_downloads import Opener
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            db = Database(folder/'gui.sqlite3')
+            client = db.add_client('Synthetic','000000000')
+            Synchronizer(db,DemoAPI()).run(client.id,threading.Event())
+            with db.connection() as conn:
+                conn.execute("UPDATE invoices SET issue_date='2025-01-01' WHERE mark=102")
+            writer = PdfWriter()
+            writer.add_blank_page(width=100,height=100)
+            stream = io.BytesIO()
+            writer.write(stream)
+            source = folder/'browser.pdf'
+            source.write_bytes(stream.getvalue())
+            root = tk.Tk()
+            root.withdraw()
+            errors = []
+            root.report_callback_exception = lambda *error: errors.append(error)
+            try:
+                app = App(root,db)
+                def wait():
+                    deadline = time.monotonic()+10
+                    while app.busy and time.monotonic()<deadline:
+                        root.update()
+                        time.sleep(0.01)
+                    self.assertFalse(app.busy)
+                    self.assertEqual(errors,[])
+                wait()
+                self.assertEqual(app.total,2)
+                app.date_from.set('01/10/2026')
+                app.date_to.set('31/10/2026')
+                app.dates_button.invoke()
+                wait()
+                self.assertEqual(app.total,1)
+                self.assertEqual(app.document_tree.get_children(),('101',))
+                app.document_tree.selection_set('101')
+                with patch('myinvoices.gui.open_provider') as browser:
+                    app.browser_button.invoke()
+                    wait()
+                    browser.assert_called_once_with(db,client,101)
+                with patch('myinvoices.gui.filedialog.askopenfilename',return_value=str(source)), patch('myinvoices.gui.messagebox.askyesno',return_value=True), patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')):
+                    app.import_button.invoke()
+                    wait()
+                self.assertIn('PDF από browser',app.document_tree.item('101','values')[-1])
+                self.assertEqual(source.read_bytes(),stream.getvalue())
+                with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.PDFDownloader',side_effect=lambda database: PDFDownloader(database,Opener(stream.getvalue()))):
+                    app.pdf_button.invoke()
+                    wait()
+                self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
+                app.date_from.set('31/02/2026')
+                app.dates_button.invoke()
+                self.assertIn('ΗΗ/ΜΜ/ΕΕΕΕ',app.last_error)
+                app.clear_dates_button.invoke()
+                wait()
+                self.assertEqual(app.total,2)
+            finally:
+                root.destroy()

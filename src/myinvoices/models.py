@@ -88,6 +88,8 @@ class Checkpoint:
     active: bool = False
     revision: int = 0
 
+    period: tuple[str, str] | None = None
+
     @property
     def request_mark(self):
         return self.query_mark if self.active else self.cursor
