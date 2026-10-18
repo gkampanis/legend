@@ -42,6 +42,8 @@ class RequestDocsAPI:
         if mark < 0:
             raise ApplicationError("Μη έγκυρο σημείο συγχρονισμού.")
         query = {"mark": str(mark)}
+        if self.credentials.entity_vat:
+            query["entityVatNumber"] = self.credentials.entity_vat
         if continuation is not None:
             if len(continuation) != 2 or not all(continuation):
                 raise ApplicationError("Μη έγκυρο continuation token.")

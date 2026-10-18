@@ -96,6 +96,16 @@ class Database:
         with self.connection() as conn:
             return [Client(**dict(r)) for r in conn.execute("SELECT * FROM clients ORDER BY name, vat")]
 
+    def rename_client(self, client_id, name):
+        name = name.strip()
+        if not name or len(name) > 200:
+            raise ApplicationError("Συμπληρώστε όνομα πελάτη έως 200 χαρακτήρες.")
+        with self.connection() as conn:
+            result = conn.execute("UPDATE clients SET name=? WHERE id=?", (name, client_id))
+            if result.rowcount != 1:
+                raise ApplicationError("Ο πελάτης δεν βρέθηκε.")
+        return self.client(client_id)
+
     def client(self, client_id):
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()

@@ -22,6 +22,7 @@ class Cancelled(ApplicationError):
 class Credentials:
     user_id: str = field(repr=False)
     subscription_key: str = field(repr=False)
+    entity_vat: str | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if not self.user_id.strip() or not self.subscription_key.strip():
@@ -29,6 +30,9 @@ class Credentials:
         if any(c in value for value in (self.user_id, self.subscription_key)
                for c in ("\r", "\n", "\x00")):
             raise ApplicationError("Μη έγκυρα API credentials.")
+        if self.entity_vat is not None and (len(self.entity_vat) != 9
+                or not self.entity_vat.isascii() or not self.entity_vat.isdigit()):
+            raise ApplicationError("Μη έγκυρο ΑΦΜ οντότητας.")
 
 
 @dataclass(frozen=True)

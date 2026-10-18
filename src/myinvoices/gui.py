@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 from .api import Environment, RequestDocsAPI
 from .demo import DemoAPI
+from .credential_store import default_store
 from .models import ApplicationError, Credentials
 from .sync import Synchronizer
 
@@ -17,8 +18,9 @@ PAGE_SIZE = 200
 
 
 class App:
-    def __init__(self, root, database, demo=True):
+    def __init__(self, root, database, demo=True, credential_store=None):
         self.root, self.db, self.demo = root, database, demo
+        self.credentials = credential_store or default_store(database.path.parent / "credentials")
         self.queue = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
@@ -29,9 +31,7 @@ class App:
         self.last_result = None
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        self.user = tk.StringVar()
-        self.key = tk.StringVar()
-        root.title("myInvoices Starter 0.1 — " + ("OFFLINE DEMO" if demo else "Σύνδεση ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.2 — " + ("OFFLINE DEMO" if demo else "Σύνδεση ΑΑΔΕ"))
         root.geometry("1180x760")
         root.minsize(950, 600)
         self._build()
@@ -46,33 +46,21 @@ class App:
         ttk.Label(outer, text=title, font=("Segoe UI", 17, "bold")).pack(anchor="w")
         notice = ("OFFLINE DEMO: συνθετικά στοιχεία, χωρίς σύνδεση ή λήψη PDF."
                   if self.demo else
-                  "Πειραματική σύνδεση ΑΑΔΕ: εκκρεμεί επαλήθευση τρέχοντος schema και live δοκιμή.")
+                  "Σύνδεση ΑΑΔΕ βάσει ERP API 2.0.2 — εκκρεμεί live δοκιμή και πλήρης υποστήριξη μεταβολών.")
         ttk.Label(outer, text=notice, wraplength=1050).pack(anchor="w", pady=(4, 10))
         bar = ttk.Frame(outer)
         bar.pack(fill="x")
         self.add_button = ttk.Button(bar, text="Νέος πελάτης", command=self._client_form)
         self.add_button.pack(side="left")
+        self.edit_button = ttk.Button(bar, text="Στοιχεία πελάτη", command=self._edit_client)
+        self.edit_button.pack(side="left", padx=6)
         self.refresh_button = ttk.Button(bar, text="Ανανέωση", command=self.refresh)
         self.refresh_button.pack(side="left", padx=6)
         self.sync_button = ttk.Button(bar, text="Συγχρονισμός επιλεγμένου", command=self._sync)
         self.sync_button.pack(side="left")
         self.stop_button = ttk.Button(bar, text="Διακοπή", command=self._stop, state="disabled")
         self.stop_button.pack(side="left", padx=6)
-        self.clear_button = ttk.Button(bar, text="Καθαρισμός credentials", command=self._clear_credentials)
-        self.clear_button.pack(side="right")
-        credentials = ttk.LabelFrame(outer, text="API credentials — μόνο στη μνήμη, όχι κωδικοί TAXISnet", padding=8)
-        credentials.pack(fill="x", pady=10)
-        ttk.Label(credentials, text="AADE User ID:").grid(row=0, column=0, sticky="w")
-        self.user_entry = ttk.Entry(credentials, textvariable=self.user, width=28)
-        self.user_entry.grid(row=0, column=1, padx=6, sticky="ew")
-        ttk.Label(credentials, text="Subscription key:").grid(row=0, column=2)
-        self.key_entry = ttk.Entry(credentials, textvariable=self.key, show="•", width=36)
-        self.key_entry.grid(row=0, column=3, padx=6, sticky="ew")
-        credentials.columnconfigure(1, weight=1)
-        credentials.columnconfigure(3, weight=1)
-        if self.demo:
-            self.user_entry.configure(state="disabled")
-            self.key_entry.configure(state="disabled")
+        ttk.Label(outer, text="Τα API credentials και το περιβάλλον ορίζονται στα στοιχεία κάθε πελάτη.").pack(anchor="w", pady=10)
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True)
         left, right = ttk.Frame(body), ttk.Frame(body)
@@ -121,13 +109,9 @@ class App:
         self.progress.pack(fill="x", pady=(10, 4))
         ttk.Label(outer, textvariable=self.status, wraplength=1050).pack(anchor="w")
 
-    def _clear_credentials(self):
-        self.user.set("")
-        self.key.set("")
-
     def _set_busy(self, value):
         self.busy = value
-        for widget in (self.add_button, self.refresh_button, self.sync_button, self.previous, self.next):
+        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.previous, self.next):
             widget.configure(state="disabled" if value else "normal")
         self.client_tree.configure(selectmode="none" if value else "browse")
         if value:
@@ -138,7 +122,7 @@ class App:
             self.previous.configure(state="normal" if self.offset > 0 else "disabled")
             self.next.configure(state="normal" if self.offset + PAGE_SIZE < self.total else "disabled")
 
-    def _submit(self, operation, completion):
+    def _submit(self, operation, completion, on_error=None):
         if self.busy:
             return
         self._set_busy(True)
@@ -147,10 +131,10 @@ class App:
             try:
                 result = operation()
             except ApplicationError as error:
-                self.queue.put(("error", str(error)))
+                self.queue.put(("error", (str(error), on_error)))
             except Exception:
                 # Never put credentials, URLs or raw exception details into GUI/logs.
-                self.queue.put(("error", "Η εργασία απέτυχε. Οι προηγούμενες αποθηκευμένες σελίδες διατηρούνται."))
+                self.queue.put(("error", ("Η εργασία απέτυχε. Οι προηγούμενες αποθηκευμένες σελίδες διατηρούνται.", on_error)))
             else:
                 self.queue.put(("done", (completion, result)))
         threading.Thread(target=worker, daemon=True).start()
@@ -171,7 +155,10 @@ class App:
                         self._set_busy(False)
                 else:
                     self._set_busy(False)
-                    self.status.set(payload)
+                    message, handler = payload
+                    self.status.set(message)
+                    if handler:
+                        handler(message)
         except queue.Empty:
             pass
         self.root.after(50, self._poll)
@@ -208,7 +195,6 @@ class App:
         if not selection or selection[0] == self.selected:
             return
         self.selected, self.offset = selection[0], 0
-        self._clear_credentials()
         client_id = self.selected
         self._submit(lambda: self._view(client_id, 0), self._display)
 
@@ -241,28 +227,31 @@ class App:
             return
         client = self.clients[self.selected]
         if self.demo:
+            if client.vat != "000000000":
+                self.status.set("Το OFFLINE DEMO έχει δεδομένα μόνο για τον συνθετικό πελάτη 000000000. Για ΑΑΔΕ ανοίξτε το run_live.bat.")
+                return
             api = DemoAPI()
         else:
-            try:
-                credentials = Credentials(self.user.get().strip(), self.key.get().strip())
-            except ApplicationError as error:
-                self.status.set(str(error))
-                return
             environment = Environment[client.environment.upper()]
             if not messagebox.askyesno("Επιβεβαίωση σύνδεσης ΑΑΔΕ",
                 f"Θα γίνουν πραγματικά, μόνο αναγνωστικά αιτήματα στο {ENVIRONMENTS[client.environment]}.\n"
                 f"Πελάτης: {client.name} · ΑΦΜ: {client.vat}\n\n"
-                "Τα credentials πρέπει να ανήκουν σε αυτόν τον πελάτη. "
-                "Η διαλειτουργικότητα με το τρέχον schema δεν έχει ακόμη επαληθευτεί. Συνέχεια;",
+                "Θα χρησιμοποιηθούν τα αποθηκευμένα credentials του πελάτη. "
+                "Απαιτείται δικαίωμα πρόσβασης/εκπροσώπησης στην ΑΑΔΕ. Συνέχεια;",
                 parent=self.root):
                 return
-            api = RequestDocsAPI(credentials, environment)
-            self._clear_credentials()
+            api = None
         self.cancel.clear()
         client_id = client.id
         self.offset = 0
         def work():
-            result = Synchronizer(self.db, api).run(client_id, self.cancel,
+            selected_api = api
+            if not self.demo:
+                credentials = self.credentials.get(client)
+                if credentials is None:
+                    raise ApplicationError("Ορίστε πρώτα AADE User ID και Subscription key στα Στοιχεία πελάτη.")
+                selected_api = RequestDocsAPI(credentials, environment)
+            result = Synchronizer(self.db, selected_api).run(client_id, self.cancel,
                 lambda pages, records: self.queue.put(("progress", (pages, records))))
             return result, self._view(client_id, 0)
         def done(payload):
@@ -283,34 +272,100 @@ class App:
     def _client_form(self):
         if self.busy:
             return
+        self._show_client_form(None, None)
+
+    def _edit_client(self):
+        if self.busy or not self.selected:
+            return
+        client = self.clients[self.selected]
+        self._submit(lambda: self.credentials.get(client),
+                     lambda credentials: self._show_client_form(client, credentials),
+                     lambda message: self._show_client_form(client, None, message))
+
+    def _show_client_form(self, client, saved_credentials, initial_error=""):
         window = tk.Toplevel(self.root)
-        window.title("Νέος πελάτης")
+        window.title("Στοιχεία πελάτη" if client else "Νέος πελάτης")
         window.transient(self.root)
         window.grab_set()
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
-        name, vat = tk.StringVar(), tk.StringVar()
-        environment = tk.StringVar(value="development")
-        for index, (label, variable) in enumerate((("Όνομα", name), ("ΑΦΜ (9 ψηφία)", vat))):
+        name = tk.StringVar(value=client.name if client else "")
+        vat = tk.StringVar(value=client.vat if client else "")
+        environment = tk.StringVar(value=client.environment if client else "development")
+        user = tk.StringVar(value=saved_credentials.user_id if saved_credentials else "")
+        key = tk.StringVar(value=saved_credentials.subscription_key if saved_credentials else "")
+        representative = tk.BooleanVar(value=bool(saved_credentials and saved_credentials.entity_vat))
+        error_text = tk.StringVar(value=initial_error)
+        for index, (label, variable) in enumerate((("Όνομα", name), ("ΑΦΜ (9 ψηφία)", vat),
+                                                   ("AADE User ID", user), ("Subscription key", key))):
             ttk.Label(frame, text=label).grid(row=index, column=0, sticky="w", pady=5)
-            ttk.Entry(frame, textvariable=variable, width=35).grid(row=index, column=1, padx=8)
-        ttk.Radiobutton(frame, text="Δοκιμαστικό ΑΑΔΕ", variable=environment, value="development").grid(row=2, column=0)
+            entry = ttk.Entry(frame, textvariable=variable, width=42, show="•" if index == 3 else "")
+            entry.grid(row=index, column=1, padx=8)
+            if index == 1:
+                vat_field = entry
+            if index == 1 and client:
+                entry.configure(state="readonly")
+            if self.demo and index >= 2:
+                entry.configure(state="disabled")
+        radio_state = "disabled" if client or self.demo else "normal"
+        ttk.Radiobutton(frame, text="Δοκιμαστικό ΑΑΔΕ", variable=environment, value="development", state=radio_state).grid(row=4, column=0)
         if not self.demo:
-            ttk.Radiobutton(frame, text="Παραγωγή ΑΑΔΕ", variable=environment, value="production").grid(row=2, column=1)
+            ttk.Radiobutton(frame, text="Παραγωγή ΑΑΔΕ", variable=environment, value="production", state=radio_state).grid(row=4, column=1)
+        ttk.Checkbutton(frame, text="Εξουσιοδοτημένος λογιστής / εκπρόσωπος (entityVatNumber)",
+            variable=representative, state="disabled" if self.demo else "normal").grid(row=5, column=0, columnspan=2, pady=6)
+        persistence = ("Windows: τα credentials αποθηκεύονται κρυπτογραφημένα για τον τρέχοντα χρήστη."
+                       if self.credentials.persistent else "Σε αυτό το σύστημα: credentials μόνο στη μνήμη, μέχρι να κλείσει η εφαρμογή.")
+        ttk.Label(frame, text=persistence, wraplength=580).grid(row=6, column=0, columnspan=2, sticky="w")
+        ttk.Label(frame, text="Δεν είναι κωδικοί TAXISnet. ΑΦΜ/περιβάλλον υπάρχοντος πελάτη δεν αλλάζουν.",
+                  wraplength=580).grid(row=7, column=0, columnspan=2, sticky="w", pady=5)
         if self.demo:
-            ttk.Label(frame, text="Το demo διαθέτει δεδομένα μόνο για ΑΦΜ 000000000.").grid(row=3, column=0, columnspan=2)
+            ttk.Label(frame, text="OFFLINE DEMO: τα API credentials δεν χρησιμοποιούνται.").grid(row=8, column=0, columnspan=2)
+        ttk.Label(frame, textvariable=error_text, wraplength=580).grid(row=9, column=0, columnspan=2)
+        def close():
+            if self.busy:
+                return
+            user.set("")
+            key.set("")
+            window.destroy()
+            self.refresh()
+        window.protocol("WM_DELETE_WINDOW", close)
         def save():
             values = name.get(), vat.get(), environment.get()
-            def done(_client):
-                window.destroy()
-                self.refresh()
-            self._submit(lambda: self.db.add_client(*values), done)
-        ttk.Button(frame, text="Αποθήκευση", command=save).grid(row=4, column=1, pady=12)
+            try:
+                credentials = None if self.demo else Credentials(user.get().strip(), key.get().strip(),
+                                                                vat.get().strip() if representative.get() else None)
+            except ApplicationError as error:
+                error_text.set(str(error))
+                return
+            def work():
+                updated = (self.db.rename_client(client.id, values[0]) if client
+                           else self.db.add_client(*values))
+                if credentials:
+                    try:
+                        self.credentials.set(updated, credentials)
+                    except ApplicationError as error:
+                        return updated, str(error)
+                return updated, None
+            def done(payload):
+                nonlocal client
+                client, error = payload
+                vat.set(client.vat)
+                environment.set(client.environment)
+                vat_field.configure(state="readonly")
+                for control in frame.winfo_children():
+                    if isinstance(control, ttk.Radiobutton):
+                        control.configure(state="disabled")
+                if error:
+                    error_text.set("Ο πελάτης αποθηκεύτηκε, αλλά όχι τα credentials. " + error)
+                    return
+                close()
+            self._submit(work, done, error_text.set)
+        ttk.Button(frame, text="Αποθήκευση πελάτη και credentials", command=save).grid(row=10, column=1, pady=12)
 
     def _close(self):
         if self.busy:
             self._stop()
             messagebox.showinfo("Εργασία σε εξέλιξη", "Ζητήθηκε διακοπή. Περιμένετε να τελειώσει η εργασία και κλείστε ξανά.", parent=self.root)
             return
-        self._clear_credentials()
+        self.credentials.clear()
         self.root.destroy()

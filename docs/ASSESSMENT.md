@@ -21,7 +21,7 @@ Database connections are short-lived and local to the thread that uses them. A p
 
 Continuation requests keep the initial query MARK during an unfinished cycle. The completed high-water MARK is promoted only when the final page commits. Interruptions retain the last committed token. Documents are uniquely keyed by `(client_id, mark)`, and each client belongs to one API environment. Currency values use Decimal/text, not binary floating point.
 
-Credentials are never persisted. Audit events have fixed fields (client ID, UTC timestamp, event kind and record count), not free-form exception/request text. URLs and raw XML stay in the local database and are treated as sensitive data.
+In the original v0.1, credentials were never persisted; v0.2 adds per-client Windows DPAPI storage (session-only on other systems). Audit events have fixed fields (client ID, UTC timestamp, event kind and record count), not free-form exception/request text. URLs and raw XML stay in the local database and are treated as sensitive data.
 
 ## Deliberate phase boundaries and limitations
 
@@ -65,3 +65,11 @@ The suite covers synthetic metadata, official URL field handling, no-link cases,
 ## Next milestone
 
 Validate against official current XSD and controlled development responses. Confirm received-invoice semantics, endpoint paths, continuation parameter names, and cursor invariants. Resolve other response sections before supporting them. Implement PDF retrieval/validation only as a subsequent focused task.
+
+## Follow-up v0.2 — 2026-10-18
+
+The official AADE ERP API 2.0.2 September 2026 PDF was retrieved directly and read. The old 403 limitation above is historical; see AADE_RESEARCH.md for the exact source URL, hash, sections, findings and outstanding schema/live limitations. Headers, RequestDocs endpoint paths, entityVatNumber representation semantics and the downloadingInvoiceUrl PDF contract have now been checked against that primary source.
+
+The GUI now configures credentials in each client's form, supports editing/name changes without resetting state, and automatically loads that client's credentials for sync. Windows uses current-user DPAPI ciphertext files; Linux uses session-only memory. SQLite schema remains at version 1; no migration or replacement of existing data was required. run_live.bat distinguishes real-mode launch from demo.
+
+Validation with `DISPLAY=:89 PYTHONPATH=src python -m unittest discover -s tests -v`: 46 discovered, 45 passed, 1 native Windows DPAPI test skipped. GUI tests include selected-client credential editing and demo isolation. No native Windows, production API or development API testing has been performed. Encryption storage-contract tests use an opaque fake backend, not an implementation of encryption.
