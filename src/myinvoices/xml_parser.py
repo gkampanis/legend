@@ -89,7 +89,7 @@ def parse_invoice(element):
     )
 
 
-def parse_response(data: bytes) -> Page:
+def read_envelope(data: bytes):
     if len(data) > MAX_RESPONSE_BYTES:
         raise ParseError("Η απόκριση XML υπερβαίνει το επιτρεπόμενο μέγεθος.")
     try:
@@ -103,7 +103,14 @@ def parse_response(data: bytes) -> Page:
     except (ET.ParseError, ValueError):
         raise ParseError("Η απόκριση δεν είναι έγκυρο XML.") from None
     if local_name(root.tag) != "RequestedDoc":
+        if local_name(root.tag) == "ResponseDoc":
+            raise ParseError("Η υπηρεσία επέστρεψε ResponseDoc αντί για παραστατικά. Η απόκριση δεν καταχωρήθηκε ως επιτυχής συγχρονισμός.")
         raise ParseError("Μη αναμενόμενη απόκριση RequestDocs.")
+    return root
+
+
+def parse_response(data: bytes) -> Page:
+    root = read_envelope(data)
     # Unknown payloads must not be silently accepted as a completed empty sync.
     allowed = {"continuationToken", "invoicesDoc", "cancelledInvoicesDoc",
                "incomeClassificationsDoc", "expensesClassificationsDoc",
@@ -112,7 +119,7 @@ def parse_response(data: bytes) -> Page:
         raise ParseError("Η απόκριση περιέχει μη υποστηριζόμενο τμήμα XML.")
     if any(len(e) for e in root
            if local_name(e.tag) not in {"continuationToken", "invoicesDoc"}):
-        raise ParseError("Η σελίδα περιλαμβάνει άλλους τύπους μεταβολών που δεν υποστηρίζονται ακόμη.")
+        raise ParseError("Η ΑΑΔΕ επέστρεψε XML με ακυρώσεις/χαρακτηρισμούς/πληρωμές. Ο parser της εφαρμογής δεν τα υποστηρίζει ακόμη· δεν πρόκειται για έλεγχο λανθασμένων credentials. Η πρόοδος δεν προχώρησε.")
     containers = [e for e in root if local_name(e.tag) == "invoicesDoc"]
     invoices = []
     for container in containers:

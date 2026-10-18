@@ -8,6 +8,7 @@ from tkinter import messagebox, ttk
 from .api import Environment, RequestDocsAPI
 from .demo import DemoAPI
 from .credential_store import default_store
+from .diagnostics import record_failure
 from .models import ApplicationError, Credentials
 from .sync import Synchronizer
 
@@ -18,7 +19,7 @@ PAGE_SIZE = 200
 
 
 class App:
-    def __init__(self, root, database, demo=True, credential_store=None):
+    def __init__(self, root, database, demo=False, credential_store=None):
         self.root, self.db, self.demo = root, database, demo
         self.credentials = credential_store or default_store(database.path.parent / "credentials")
         self.queue = queue.Queue()
@@ -29,9 +30,10 @@ class App:
         self.offset = 0
         self.total = 0
         self.last_result = None
+        self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.2 — " + ("OFFLINE DEMO" if demo else "Σύνδεση ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.2.1 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1180x760")
         root.minsize(950, 600)
         self._build()
@@ -48,6 +50,9 @@ class App:
                   if self.demo else
                   "Σύνδεση ΑΑΔΕ βάσει ERP API 2.0.2 — εκκρεμεί live δοκιμή και πλήρης υποστήριξη μεταβολών.")
         ttk.Label(outer, text=notice, wraplength=1050).pack(anchor="w", pady=(4, 10))
+        if self.demo:
+            ttk.Label(outer, text="Για ενεργά πεδία API: κλείστε το demo και ανοίξτε START_MYINVOICES.bat.",
+                      wraplength=1050).pack(anchor="w", pady=(0, 8))
         bar = ttk.Frame(outer)
         bar.pack(fill="x")
         self.add_button = ttk.Button(bar, text="Νέος πελάτης", command=self._client_form)
@@ -126,15 +131,18 @@ class App:
         if self.busy:
             return
         self._set_busy(True)
+        self.operation_stage = "local"
         self.status.set("Εργασία σε εξέλιξη…")
         def worker():
             try:
                 result = operation()
             except ApplicationError as error:
-                self.queue.put(("error", (str(error), on_error)))
-            except Exception:
+                record_failure(self.db.path.parent / "diagnostics.jsonl", error, self.operation_stage)
+                self.queue.put(("error", (f"[{self.operation_stage}] {error}", on_error)))
+            except Exception as error:
                 # Never put credentials, URLs or raw exception details into GUI/logs.
-                self.queue.put(("error", ("Η εργασία απέτυχε. Οι προηγούμενες αποθηκευμένες σελίδες διατηρούνται.", on_error)))
+                record_failure(self.db.path.parent / "diagnostics.jsonl", error, self.operation_stage)
+                self.queue.put(("error", (f"[{self.operation_stage}] Εσωτερικό σφάλμα εφαρμογής. Η προηγούμενη πρόοδος διατηρείται. Καταγράφηκε διάγνωση στο diagnostics.jsonl.", on_error)))
             else:
                 self.queue.put(("done", (completion, result)))
         threading.Thread(target=worker, daemon=True).start()
@@ -247,12 +255,14 @@ class App:
         def work():
             selected_api = api
             if not self.demo:
+                self.operation_stage = "credentials"
                 credentials = self.credentials.get(client)
                 if credentials is None:
                     raise ApplicationError("Ορίστε πρώτα AADE User ID και Subscription key στα Στοιχεία πελάτη.")
                 selected_api = RequestDocsAPI(credentials, environment)
             result = Synchronizer(self.db, selected_api).run(client_id, self.cancel,
-                lambda pages, records: self.queue.put(("progress", (pages, records))))
+                lambda pages, records: self.queue.put(("progress", (pages, records))),
+                lambda stage: setattr(self, "operation_stage", stage))
             return result, self._view(client_id, 0)
         def done(payload):
             result, view = payload
@@ -278,11 +288,14 @@ class App:
         if self.busy or not self.selected:
             return
         client = self.clients[self.selected]
-        self._submit(lambda: self.credentials.get(client),
-                     lambda credentials: self._show_client_form(client, credentials),
+        def load():
+            editable = self.db.checkpoint(client.id).revision == 0 and self.db.count(client.id) == 0
+            return self.credentials.get(client), editable
+        self._submit(load,
+                     lambda payload: self._show_client_form(client, payload[0], environment_editable=payload[1]),
                      lambda message: self._show_client_form(client, None, message))
 
-    def _show_client_form(self, client, saved_credentials, initial_error=""):
+    def _show_client_form(self, client, saved_credentials, initial_error="", environment_editable=False):
         window = tk.Toplevel(self.root)
         window.title("Στοιχεία πελάτη" if client else "Νέος πελάτης")
         window.transient(self.root)
@@ -291,7 +304,7 @@ class App:
         frame.pack(fill="both", expand=True)
         name = tk.StringVar(value=client.name if client else "")
         vat = tk.StringVar(value=client.vat if client else "")
-        environment = tk.StringVar(value=client.environment if client else "development")
+        environment = tk.StringVar(value=client.environment if client else ("development" if self.demo else "production"))
         user = tk.StringVar(value=saved_credentials.user_id if saved_credentials else "")
         key = tk.StringVar(value=saved_credentials.subscription_key if saved_credentials else "")
         representative = tk.BooleanVar(value=bool(saved_credentials and saved_credentials.entity_vat))
@@ -307,7 +320,7 @@ class App:
                 entry.configure(state="readonly")
             if self.demo and index >= 2:
                 entry.configure(state="disabled")
-        radio_state = "disabled" if client or self.demo else "normal"
+        radio_state = "disabled" if (client and not environment_editable) or self.demo else "normal"
         ttk.Radiobutton(frame, text="Δοκιμαστικό ΑΑΔΕ", variable=environment, value="development", state=radio_state).grid(row=4, column=0)
         if not self.demo:
             ttk.Radiobutton(frame, text="Παραγωγή ΑΑΔΕ", variable=environment, value="production", state=radio_state).grid(row=4, column=1)
@@ -316,7 +329,7 @@ class App:
         persistence = ("Windows: τα credentials αποθηκεύονται κρυπτογραφημένα για τον τρέχοντα χρήστη."
                        if self.credentials.persistent else "Σε αυτό το σύστημα: credentials μόνο στη μνήμη, μέχρι να κλείσει η εφαρμογή.")
         ttk.Label(frame, text=persistence, wraplength=580).grid(row=6, column=0, columnspan=2, sticky="w")
-        ttk.Label(frame, text="Δεν είναι κωδικοί TAXISnet. ΑΦΜ/περιβάλλον υπάρχοντος πελάτη δεν αλλάζουν.",
+        ttk.Label(frame, text="Κλειδιά από το κανονικό myDATA: Παραγωγή ΑΑΔΕ. Κλειδιά από το dev portal: Δοκιμαστικό ΑΑΔΕ.\nΤο ΑΦΜ μένει σταθερό. Αλλαγή περιβάλλοντος επιτρέπεται πριν τον πρώτο αποθηκευμένο συγχρονισμό.",
                   wraplength=580).grid(row=7, column=0, columnspan=2, sticky="w", pady=5)
         if self.demo:
             ttk.Label(frame, text="OFFLINE DEMO: τα API credentials δεν χρησιμοποιούνται.").grid(row=8, column=0, columnspan=2)
@@ -338,7 +351,7 @@ class App:
                 error_text.set(str(error))
                 return
             def work():
-                updated = (self.db.rename_client(client.id, values[0]) if client
+                updated = (self.db.configure_client(client.id, values[0], values[2]) if client
                            else self.db.add_client(*values))
                 if credentials:
                     try:

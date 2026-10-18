@@ -73,3 +73,13 @@ The official AADE ERP API 2.0.2 September 2026 PDF was retrieved directly and re
 The GUI now configures credentials in each client's form, supports editing/name changes without resetting state, and automatically loads that client's credentials for sync. Windows uses current-user DPAPI ciphertext files; Linux uses session-only memory. SQLite schema remains at version 1; no migration or replacement of existing data was required. run_live.bat distinguishes real-mode launch from demo.
 
 Validation with `DISPLAY=:89 PYTHONPATH=src python -m unittest discover -s tests -v`: 46 discovered, 45 passed, 1 native Windows DPAPI test skipped. GUI tests include selected-client credential editing and demo isolation. No native Windows, production API or development API testing has been performed. Encryption storage-contract tests use an opaque fake backend, not an implementation of encryption.
+
+## Follow-up v0.2.1 — startup and rejection diagnosis
+
+The Product Owner reported disabled fields and the old generic connection rejection. The screenshots proved demo mode was open; the reported rejection message only narrowed the prior HTTP result to 401 or 403. No specific live cause has been proven.
+
+Normal editable client configuration is now the default entry point; START_MYINVOICES.bat and compatibility run_demo.bat open it. Explicit demo remains under demo_only.bat / --demo. New real clients default to production. Before a first page commit, an unused client's environment can be corrected transactionally without changing its VAT or losing data. Production API calls still require explicit GUI confirmation.
+
+Errors now distinguish HTTP 401/403, selected environment, TLS/network, credential loading, XML parsing and database stages. Diagnostics deliberately omit exception text, response bodies, headers, URLs and locals. A separate explicitly invoked probe reads secure bindings, sends a single today's-date RequestDocs query, and prints no invoice data. With absent bindings it makes no request. No live probe with credentials has yet run.
+
+Validation: 53 discovered tests, 52 passed with Xvfb, 1 native Windows DPAPI test skipped. Includes default startup, explicit demo, environment changes before/after sync, safe diagnostics, date query encoding and no-secret/no-body probe output. Offline smoke and compilation passed. Native Windows launchers remain unexecuted on this Linux machine.

@@ -12,7 +12,7 @@ class Synchronizer:
             raise ValueError("max_pages must be positive")
         self.max_pages = max_pages
 
-    def run(self, client_id, cancel=None, progress=None):
+    def run(self, client_id, cancel=None, progress=None, stage=None):
         cancel = cancel or threading.Event()
         client = self.database.client(client_id)
         if self.api.environment.name.lower() != client.environment:
@@ -22,10 +22,16 @@ class Synchronizer:
         while pages < self.max_pages:
             if cancel.is_set():
                 return SyncResult(pages, records, True)
+            if stage:
+                stage("request")
             raw = self.api.fetch(checkpoint.request_mark, checkpoint.continuation)
+            if stage:
+                stage("xml")
             page = parse_response(raw)
             if cancel.is_set():
                 return SyncResult(pages, records, True)
+            if stage:
+                stage("database")
             checkpoint = self.database.commit_page(checkpoint, page)
             pages += 1
             records += len(page.invoices)

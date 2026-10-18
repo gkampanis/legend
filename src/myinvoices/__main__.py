@@ -19,9 +19,9 @@ def prepare_demo(database):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="myInvoices Starter — offline demo by default")
+    parser = argparse.ArgumentParser(description="myInvoices Starter — normal client configuration by default")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--demo", action="store_true", help="Offline synthetic data (default)")
+    mode.add_argument("--demo", action="store_true", help="Explicit offline demonstration with synthetic data")
     mode.add_argument("--live", action="store_true", help="Enable experimental real AADE requests after GUI confirmation")
     parser.add_argument("--db", type=Path, help="Separate local database path; never point at legacy data")
     parser.add_argument("--check-demo", action="store_true", help="Run repeatable offline smoke check without GUI")
@@ -40,7 +40,7 @@ def main(argv=None):
             assert database.checkpoint(client.id).cursor == 102
             print("OFFLINE DEMO OK: 2 records, no duplicates, cursor 102, no PDF claimed verified.")
         return 0
-    demo = not args.live
+    demo = args.demo
     database = Database(args.db or data_directory() / ("demo.sqlite3" if demo else "myinvoices.sqlite3"))
     if demo:
         prepare_demo(database)

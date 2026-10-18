@@ -106,6 +106,27 @@ class Database:
                 raise ApplicationError("Ο πελάτης δεν βρέθηκε.")
         return self.client(client_id)
 
+    def configure_client(self, client_id, name, environment):
+        name = name.strip()
+        if not name or len(name) > 200 or environment not in {"development", "production"}:
+            raise ApplicationError("Μη έγκυρο όνομα ή περιβάλλον πελάτη.")
+        try:
+            with self.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+                if client is None:
+                    raise ApplicationError("Ο πελάτης δεν βρέθηκε.")
+                if client["environment"] != environment:
+                    state = conn.execute("SELECT revision FROM checkpoints WHERE client_id=?", (client_id,)).fetchone()
+                    count = conn.execute("SELECT count(*) FROM invoices WHERE client_id=?", (client_id,)).fetchone()[0]
+                    if count or state[0]:
+                        raise ApplicationError("Ο πελάτης έχει ήδη συγχρονισμένα δεδομένα. Προσθέστε ξεχωριστή εγγραφή για το άλλο περιβάλλον.")
+                conn.execute("UPDATE clients SET name=?, environment=? WHERE id=?", (name, environment, client_id))
+                conn.commit()
+        except sqlite3.IntegrityError:
+            raise ApplicationError("Υπάρχει ήδη αυτό το ΑΦΜ στο επιλεγμένο περιβάλλον.") from None
+        return self.client(client_id)
+
     def client(self, client_id):
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()

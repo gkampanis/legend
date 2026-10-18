@@ -27,7 +27,8 @@ class GUITests(unittest.TestCase):
             errors = []
             root.report_callback_exception = lambda *error: errors.append(error)
             try:
-                app = App(root, database, demo=False, credential_store=store)
+                app = App(root, database, credential_store=store)
+                self.assertFalse(app.demo)
                 def wait_for(predicate):
                     deadline = time.monotonic() + 10
                     while not predicate() and time.monotonic() < deadline:
@@ -44,6 +45,8 @@ class GUITests(unittest.TestCase):
                 entries = {int(w.grid_info()["row"]): w for w in frame.winfo_children() if isinstance(w, ttk.Entry)}
                 self.assertEqual(entries[2].get(), "FIRST-USER")
                 self.assertEqual(entries[3].get(), "FIRST-KEY")
+                self.assertEqual(str(entries[2].cget("state")), "normal")
+                self.assertEqual(str(entries[3].cget("state")), "normal")
                 self.assertEqual(entries[3].cget("show"), "•")
                 self.assertEqual(str(entries[1].cget("state")), "readonly")
                 entries[0].delete(0, "end")
