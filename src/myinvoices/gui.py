@@ -16,6 +16,7 @@ from .local_check import check_client
 from .sync import Synchronizer
 from .pdf_downloads import PDFDownloader, state_label, open_provider, import_browser_pdf
 from .date_range import DateRange
+from .browser_downloads import BrowserPDFDownloader
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -48,7 +49,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.5.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.6.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -71,7 +72,7 @@ class App:
         ttk.Label(outer, text=title, font=("Segoe UI", 17, "bold")).pack(anchor="w")
         notice = ("OFFLINE DEMO: συνθετικά στοιχεία, χωρίς σύνδεση ή λήψη PDF."
                   if self.demo else
-                  "Στοιχεία και σύνδεση ανά πελάτη · Έλεγχος API χωρίς αποθήκευση παραστατικών · PDF: απευθείας λήψη σε φάκελο προς έλεγχο.")
+                  "Στοιχεία και σύνδεση ανά πελάτη · Έλεγχος API χωρίς αποθήκευση παραστατικών · PDF: άμεση λήψη ή φόρτωση μέσω browser.")
         ttk.Label(outer, text=notice, wraplength=1050).pack(anchor="w", pady=(4, 10))
         if self.demo:
             ttk.Label(outer, text="Για ενεργά πεδία API: κλείστε το demo και ανοίξτε START_MYINVOICES.bat.",
@@ -95,9 +96,13 @@ class App:
         pdf_bar.pack(fill="x", pady=(0, 8))
         self.pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF περιόδου", command=self._download_pdfs)
         self.pdf_button.pack(side="left")
-        self.browser_button = ttk.Button(pdf_bar, text="Άνοιγμα επιλεγμένου στον browser", command=self._open_provider)
+        self.browser_pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF μέσω browser", command=lambda: self._download_pdfs(browser=True))
+        self.browser_pdf_button.pack(side="left", padx=6)
+        manual_bar = ttk.Frame(outer)
+        manual_bar.pack(fill="x", pady=(0, 8))
+        self.browser_button = ttk.Button(manual_bar, text="Άνοιγμα επιλεγμένου στον browser", command=self._open_provider)
         self.browser_button.pack(side="left", padx=6)
-        self.import_button = ttk.Button(pdf_bar, text="Εισαγωγή PDF από browser", command=self._import_pdf)
+        self.import_button = ttk.Button(manual_bar, text="Εισαγωγή PDF από browser", command=self._import_pdf)
         self.import_button.pack(side="left")
         date_bar = ttk.Frame(outer)
         date_bar.pack(fill="x", pady=(0, 8))
@@ -247,7 +252,7 @@ class App:
 
     def _set_busy(self, value):
         self.busy = value
-        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.pdf_button, self.browser_button, self.import_button, self.from_entry, self.to_entry, self.dates_button, self.clear_dates_button, self.search_entry, self.previous, self.next):
+        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.pdf_button, self.browser_pdf_button, self.browser_button, self.import_button, self.from_entry, self.to_entry, self.dates_button, self.clear_dates_button, self.search_entry, self.previous, self.next):
             widget.configure(state="disabled" if value else "normal")
         self.client_tree.configure(selectmode="none" if value else "browse")
         if value:
@@ -282,7 +287,9 @@ class App:
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
-                if kind == "pdf_progress":
+                if kind == "browser_notice":
+                    self._message(payload)
+                elif kind == "pdf_progress":
                     done, total = payload
                     self.status.set(f"Έλεγχος συνδέσμων PDF: {done} / {total}")
                 elif kind == "progress":
@@ -510,7 +517,7 @@ class App:
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 
-    def _download_pdfs(self):
+    def _download_pdfs(self, browser=False):
         if self.busy or not self.selected:
             return
         if self.demo:
@@ -529,7 +536,9 @@ class App:
         self.cancel.clear()
         def work():
             self.operation_stage = "pdf"
-            result = PDFDownloader(self.db).run(client, destination, self.cancel,
+            downloader = (BrowserPDFDownloader(self.db, notice=lambda message: self.queue.put(("browser_notice", message)))
+                          if browser else PDFDownloader(self.db))
+            result = downloader.run(client, destination, self.cancel,
                 lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
             return result, self._view(client.id, self.offset)
         def done(payload):
@@ -541,7 +550,9 @@ class App:
                 f"Εκκρεμή: {result['pending']}. Φάκελος: {destination}. "
                 "Τα PDF είναι ΠΡΟΣ_ΕΛΕΓΧΟ: δεν έχει επαληθευτεί η ταυτότητα του παραστατικού. "
                 + (f" Αιτίες: {reasons}." if reasons else "") +
-                " Για σελίδα/CAPTCHA: επιλέξτε παραστατικό → Άνοιγμα στον browser → κατεβάστε το PDF → Εισαγωγή PDF από browser.")
+                " Για ιστοσελίδες δοκιμάστε Λήψη PDF μέσω browser. "
+                "Ολοκληρώστε τυχόν έλεγχο στο παράθυρο που ανοίγει· η εφαρμογή παραλαμβάνει το PDF όταν φορτωθεί. "
+                "Η χειροκίνητη εισαγωγή παραμένει διαθέσιμη.")
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 

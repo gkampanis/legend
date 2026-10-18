@@ -1,5 +1,6 @@
 """Direct provider PDFs. No AADE credentials, challenge solving or URL guessing."""
 from datetime import date
+import io
 import hashlib
 from collections import Counter
 import webbrowser
@@ -16,9 +17,17 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 import uuid
 
 from .models import ApplicationError
+from .provider_documents import MAX_DESCRIPTOR_BYTES, ResolutionError, resolve_document
 
 MAX_BYTES = 40 * 1024 * 1024
 LABELS = {
+    'browser_required': 'Εκκρεμεί: χρειάζεται φόρτωση στον browser',
+    'browser_timeout': 'Εκκρεμεί: ο browser δεν παρέδωσε PDF εγκαίρως',
+    'browser_download_failed': 'Εκκρεμεί: απέτυχε το download στον browser',
+    'browser_closed': 'Εκκρεμεί: έκλεισε ο browser',
+    'ambiguous_document': 'Εκκρεμεί: περισσότερα από ένα πιθανά PDF',
+    'descriptor_limit': 'Εκκρεμεί: μεγάλη ή σύνθετη σελίδα/JSON',
+    'invalid_descriptor': 'Εκκρεμεί: μη έγκυρο JSON παρόχου',
     'imported_unverified': 'PDF από browser — προς έλεγχο',
     'saved_unverified': 'PDF αποθηκευμένο — προς έλεγχο',
     'challenge': 'Εκκρεμεί: προστασία παρόχου / CAPTCHA',
@@ -161,7 +170,7 @@ class SafeRedirect(HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         validate_url(newurl)
-        return Request(newurl, headers={'Accept': 'application/pdf', 'User-Agent': 'myInvoices/0.4'})
+        return Request(newurl, headers={'Accept': 'application/pdf', 'User-Agent': 'myInvoices/0.6'})
 
 
 def valid_pdf(path):
@@ -228,12 +237,17 @@ class PDFDownloader:
             progress(index + 1, len(rows))
         return result
 
-    def _download(self, client, row, root, cancel):
-        validate_url(row['download_url'])
-        request = Request(row['download_url'], headers={'Accept': 'application/pdf', 'User-Agent': 'myInvoices/0.4'})
-        temporary = None
-        final = None
-        try:
+    def _open_document(self, url, cancel):
+        visited = set()
+        for _step in range(4):
+            if cancel.is_set():
+                return None
+            if url in visited:
+                raise Pending('html_page')
+            visited.add(url)
+            validate_url(url)
+            request = Request(url, headers={'Accept': 'application/pdf, application/json, text/html;q=0.8',
+                                           'User-Agent': 'myInvoices/0.6'})
             try:
                 response = self.opener.open(request, timeout=30)
             except HTTPError as error:
@@ -250,17 +264,47 @@ class PDFDownloader:
                 finally:
                     error.close()
                 raise Pending(state) from None
-            with response:
+            transferred = False
+            try:
                 if response.headers.get('cf-mitigated') == 'challenge':
                     raise Pending('challenge')
                 if getattr(response, 'status', 200) != 200:
                     raise Pending(f'http_{response.status}')
                 prefix = response.read(65536)
+                if prefix.startswith(b'%PDF-'):
+                    transferred = True
+                    return response, prefix
                 lower = prefix.lower()
-                if any(marker in lower for marker in (b'cf-chl-', b'challenge-platform', b'captcha', b'cf-turnstile')) and not prefix.startswith(b'%PDF-'):
+                if any(marker in lower for marker in (b'cf-chl-', b'challenge-platform', b'captcha', b'cf-turnstile')):
                     raise Pending('challenge')
-                if not prefix.startswith(b'%PDF-'):
-                    raise Pending('html_page' if b'<html' in lower or b'<!doctype html' in lower else 'invalid_pdf')
+                is_descriptor = ('json' in response.headers.get('Content-Type', '').lower()
+                    or b'<html' in lower or b'<!doctype html' in lower
+                    or prefix.lstrip().startswith((b'{', b'[')))
+                if not is_descriptor:
+                    raise Pending('invalid_pdf')
+                body = prefix + response.read(MAX_DESCRIPTOR_BYTES + 1 - len(prefix))
+                final_url = response.geturl() if hasattr(response, 'geturl') else url
+                reference = resolve_document(body, final_url, response.headers.get('Content-Type', ''))
+            except ResolutionError as error:
+                raise Pending(error.state) from None
+            finally:
+                # Direct PDF ownership is transferred to the streaming caller only.
+                if not transferred:
+                    response.close()
+            if isinstance(reference, bytes):
+                stream = io.BytesIO(reference)
+                return stream, stream.read(65536)
+            url = reference
+        raise Pending('html_page')
+
+    def _download(self, client, row, root, cancel):
+        temporary = None
+        try:
+            opened = self._open_document(row['download_url'], cancel)
+            if opened is None:
+                return None
+            response, prefix = opened
+            with response:
                 folder = review_folder(root, client, row)
                 with tempfile.NamedTemporaryFile(dir=folder, suffix='.part', delete=False) as stream:
                     temporary = Path(stream.name)

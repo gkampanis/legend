@@ -236,6 +236,12 @@ class GUITests(unittest.TestCase):
                     app.pdf_button.invoke()
                     wait()
                 self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
+                app.document_tree.selection_remove(*app.document_tree.selection())
+                with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.BrowserPDFDownloader',side_effect=lambda database, **kwargs: PDFDownloader(database,Opener(stream.getvalue()))) as browser_batch:
+                    app.browser_pdf_button.invoke()
+                    wait()
+                    self.assertEqual(browser_batch.call_count,1)
+                self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
                 app.date_from.set('31/02/2026')
                 app.dates_button.invoke()
                 self.assertIn('ΗΗ/ΜΜ/ΕΕΕΕ',app.last_error)
