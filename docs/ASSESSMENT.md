@@ -83,3 +83,11 @@ Normal editable client configuration is now the default entry point; START_MYINV
 Errors now distinguish HTTP 401/403, selected environment, TLS/network, credential loading, XML parsing and database stages. Diagnostics deliberately omit exception text, response bodies, headers, URLs and locals. A separate explicitly invoked probe reads secure bindings, sends a single today's-date RequestDocs query, and prints no invoice data. With absent bindings it makes no request. No live probe with credentials has yet run.
 
 Validation: 53 discovered tests, 52 passed with Xvfb, 1 native Windows DPAPI test skipped. Includes default startup, explicit demo, environment changes before/after sync, safe diagnostics, date query encoding and no-secret/no-body probe output. Offline smoke and compilation passed. Native Windows launchers remain unexecuted on this Linux machine.
+
+## Follow-up v0.2.2 — local diagnostic alternative
+
+The cloud checks did not expose usable secret bindings, while the Product Owner reported entering values in Network Secrets. This discrepancy does not prove the user failed to save anything. No cloud auth request could be made with those inaccessible bindings. The specific cause of the Windows connection rejection remains unconfirmed.
+
+CHECK_AADE.bat now runs a local, explicitly initiated check using the existing per-client credentials on the user's own PC and their saved API environment. It performs one today's-date RequestDocs request, checks the XML envelope, and does not save invoice data or advance synchronization state. It does not require cloud secrets or ask for keys in the terminal. It keeps the console open for the fixed safe result/status message.
+
+Validation: full offline suite discovered 58 tests: 55 passed, native Windows DPAPI and 2 GUI tests skipped without a display. The 5 new local-check tests all passed, covering saved credentials/environment, unchanged checkpoints, safe results, missing credentials/database, HTTP status propagation and cancellation before a request. Compileall and diff checks passed. This does not constitute native Windows or live AADE validation.
