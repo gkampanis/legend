@@ -12,14 +12,20 @@ from .models import ApplicationError
 from .xml_parser import read_envelope
 
 
-def check_client(database, store, client_id, api_factory=RequestDocsAPI):
+def check_client(database, store, client_id, api_factory=RequestDocsAPI, stage=None):
+    if stage:
+        stage("credentials")
     client = database.client(client_id)
     credentials = store.get(client)
     if credentials is None:
         raise ApplicationError("Δεν βρέθηκαν αποθηκευμένα credentials για αυτόν τον πελάτη. Ορίστε τα τοπικά από Στοιχεία πελάτη.")
     api = api_factory(credentials, Environment[client.environment.upper()])
     today = date.today()
+    if stage:
+        stage("request")
     body = api.fetch(0, date_from=today, date_to=today)
+    if stage:
+        stage("xml")
     read_envelope(body)
     return ("ΕΠΙΤΥΧΙΑ: HTTP 200 και έγκυρος φάκελος RequestedDoc. "
             "Η ταυτοποίηση έγινε δεκτή. Δεν αποθηκεύτηκαν παραστατικά ή πρόοδος συγχρονισμού.")

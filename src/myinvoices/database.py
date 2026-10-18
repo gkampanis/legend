@@ -4,7 +4,9 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import tempfile
 import uuid
+import xml.etree.ElementTree as ET
 
 from .models import ApplicationError, Checkpoint, Client, SyncError
 
@@ -40,6 +42,17 @@ CREATE TABLE events (
 PRAGMA user_version = 1;
 """
 
+EXTENSION = """
+CREATE TABLE IF NOT EXISTS document_changes (
+    client_id TEXT NOT NULL REFERENCES clients(id), kind TEXT NOT NULL,
+    record_key TEXT NOT NULL, event_mark INTEGER, invoice_mark INTEGER NOT NULL,
+    cancellation_date TEXT, raw_xml TEXT NOT NULL, updated_at TEXT NOT NULL,
+    PRIMARY KEY(client_id, kind, record_key)
+);
+CREATE INDEX IF NOT EXISTS changes_invoice_idx ON document_changes(client_id, invoice_mark, kind);
+PRAGMA user_version = 2;
+"""
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -55,8 +68,25 @@ class Database:
                 tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
                 if tables:
                     raise ApplicationError("Η βάση δεν ανήκει σε αυτή την έκδοση του myInvoices.")
-                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + "\nCOMMIT;")
-            elif version != 1:
+                conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + EXTENSION + "\nCOMMIT;")
+            elif version == 1:
+                # Additive migration only, with a separate consistent SQLite backup first.
+                required = {"clients", "invoices", "checkpoints", "events", "continuation_history"}
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not required <= tables:
+                    raise ApplicationError("Μη αναμενόμενη δομή βάσης· δεν έγινε αναβάθμιση.")
+                with tempfile.NamedTemporaryFile(prefix=self.path.stem + "-schema1-backup-",
+                                                  suffix=".sqlite3", dir=self.path.parent, delete=False) as file:
+                    backup_path = Path(file.name)
+                backup = sqlite3.connect(backup_path)
+                try:
+                    conn.backup(backup)
+                    if backup.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                        raise ApplicationError("Δεν επαληθεύτηκε το αντίγραφο ασφαλείας. Δεν έγινε αναβάθμιση.")
+                finally:
+                    backup.close()
+                conn.executescript("BEGIN IMMEDIATE;\n" + EXTENSION + "\nCOMMIT;")
+            elif version != 2:
                 raise ApplicationError("Μη υποστηριζόμενη έκδοση βάσης δεδομένων.")
 
     @contextmanager
@@ -147,13 +177,25 @@ class Database:
         """Invoice writes and the next cursor commit together, or neither does."""
         client = self.client(checkpoint.client_id)
         highwater = max([checkpoint.cursor, checkpoint.highwater]
-                        + [invoice.mark for invoice in page.invoices])
+                        + [invoice.mark for invoice in page.invoices]
+                        + [change.event_mark for change in page.changes if change.event_mark is not None])
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT revision FROM checkpoints WHERE client_id=?",
                                    (client.id,)).fetchone()
             if current is None or current[0] != checkpoint.revision:
                 raise SyncError("Η πρόοδος άλλαξε από άλλη εργασία. Δοκιμάστε ξανά.")
+            for change in page.changes:
+                canonical = ET.canonicalize(change.raw_xml, strip_text=True, rewrite_prefixes=True)
+                key = (str(change.event_mark) if change.event_mark is not None
+                       else "xml:" + hashlib.sha256(canonical.encode()).hexdigest())
+                conn.execute("""INSERT INTO document_changes VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(client_id, kind, record_key) DO UPDATE SET
+                    event_mark=excluded.event_mark, invoice_mark=excluded.invoice_mark,
+                    cancellation_date=excluded.cancellation_date, raw_xml=excluded.raw_xml,
+                    updated_at=excluded.updated_at""",
+                    (client.id, change.kind, key, change.event_mark, change.invoice_mark,
+                     change.cancellation_date, change.raw_xml, now()))
             if page.continuation:
                 digest = hashlib.sha256(json.dumps(page.continuation).encode()).hexdigest()
                 try:
@@ -192,19 +234,31 @@ class Database:
                             partition_key=?, row_key=?, active=?, revision=revision+1 WHERE client_id=?""",
                          (cursor, query, highwater, partition, row, active, client.id))
             conn.execute("INSERT INTO events(client_id, at, kind, record_count) VALUES (?, ?, ?, ?)",
-                         (client.id, now(), "page_committed", len(page.invoices)))
+                         (client.id, now(), "page_committed", len(page.invoices) + len(page.changes)))
             conn.commit()
         return self.checkpoint(client.id)
 
     def invoices(self, client_id, offset=0, limit=200):
         with self.connection() as conn:
             return [dict(r) for r in conn.execute(
-                "SELECT * FROM invoices WHERE client_id=? ORDER BY issue_date DESC, mark DESC LIMIT ? OFFSET ?",
+                """SELECT i.*, EXISTS(SELECT 1 FROM document_changes c
+                    WHERE c.client_id=i.client_id AND c.invoice_mark=i.mark AND c.kind='cancellation') AS cancelled
+                    FROM invoices i WHERE client_id=? ORDER BY issue_date DESC, mark DESC LIMIT ? OFFSET ?""",
                 (client_id, limit, offset))]
 
     def count(self, client_id):
         with self.connection() as conn:
             return conn.execute("SELECT count(*) FROM invoices WHERE client_id=?", (client_id,)).fetchone()[0]
+
+    def changes(self, client_id, limit=200):
+        with self.connection() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM document_changes WHERE client_id=? ORDER BY event_mark DESC, record_key LIMIT ?",
+                (client_id, limit))]
+
+    def change_count(self, client_id):
+        with self.connection() as conn:
+            return conn.execute("SELECT count(*) FROM document_changes WHERE client_id=?", (client_id,)).fetchone()[0]
 
     def events(self, client_id, limit=100):
         with self.connection() as conn:

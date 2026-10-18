@@ -5,9 +5,14 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
-from .models import Invoice, Page, ParseError
+from .models import DocumentChange, Invoice, Page, ParseError
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+# Only known technical root names can appear in diagnostic messages, never arbitrary XML names/values.
+DIAGNOSTIC_ROOTS = {"RequestedDoc", "RequestedDocs", "requestedDoc", "requestedDocs",
+                    "InvoicesDoc", "ResponseDoc", "Response", "Error", "error", "ErrorResponse",
+                    "string", "RequestDocsResponse", "RequestedDocResponse", "Envelope", "html", "HTML"}
 
 
 def local_name(tag):
@@ -25,12 +30,12 @@ def text(element, name):
     return e.text.strip() if e is not None and e.text and e.text.strip() else None
 
 
-def positive_mark(value):
+def positive_mark(value, label="invoice MARK"):
     if not value or not value.isascii() or not value.isdigit():
-        raise ParseError("Λείπει ή δεν είναι έγκυρο το invoice MARK.")
+        raise ParseError(f"Λείπει ή δεν είναι έγκυρο το {label}.")
     mark = int(value)
     if not 0 < mark <= 9223372036854775807:
-        raise ParseError("Μη έγκυρο invoice MARK.")
+        raise ParseError(f"Μη έγκυρο {label}.")
     return mark
 
 
@@ -100,13 +105,51 @@ def read_envelope(data: bytes):
         raise ParseError("Δεν επιτρέπονται DTD ή entities στο XML.")
     try:
         root = ET.fromstring(decoded)
-    except (ET.ParseError, ValueError):
-        raise ParseError("Η απόκριση δεν είναι έγκυρο XML.") from None
+    except ET.ParseError as error:
+        line, column = error.position
+        raise ParseError(f"Η απόκριση δεν είναι έγκυρο XML (γραμμή {line}, στήλη {column}).") from None
+    except ValueError:
+        raise ParseError("Μη υποστηριζόμενη δήλωση κωδικοποίησης XML.") from None
     if local_name(root.tag) != "RequestedDoc":
-        if local_name(root.tag) == "ResponseDoc":
-            raise ParseError("Η υπηρεσία επέστρεψε ResponseDoc αντί για παραστατικά. Η απόκριση δεν καταχωρήθηκε ως επιτυχής συγχρονισμός.")
-        raise ParseError("Μη αναμενόμενη απόκριση RequestDocs.")
+        if local_name(root.tag) in {"ResponseDoc", "Error", "error", "ErrorResponse", "Response"}:
+            codes = sorted({e.text.strip() for e in root.iter() if local_name(e.tag) in {"code", "Code", "statusCode", "StatusCode"}
+                            and e.text and e.text.strip().isascii() and e.text.strip().isdigit()})
+            suffix = (" Κωδικοί: " + ", ".join(codes[:10])) if codes else ""
+            label = local_name(root.tag)
+            raise ParseError(f"Απάντηση XML σφάλματος/κατάστασης [XML_ROOT={label}] αντί για RequestedDoc. Δεν αποθηκεύτηκε πρόοδος." + suffix, label)
+        if local_name(root.tag).lower() == "html":
+            raise ParseError("Επιστράφηκε HTML αντί για XML παραστατικών, πιθανώς από σελίδα πρόσβασης ή proxy.")
+        root_name = local_name(root.tag)
+        label = root_name if root_name in DIAGNOSTIC_ROOTS else "UNKNOWN"
+        raise ParseError(f"Μη αναμενόμενη απόκριση RequestDocs [XML_ROOT={label}]. Αναμενόταν RequestedDoc. Δεν αποθηκεύτηκε πρόοδος.", label)
     return root
+
+
+# Names and mark fields follow RequestedDoc and its referenced AADE types.
+CHANGE_SECTIONS = {
+    "cancelledInvoicesDoc": ("cancelledInvoice", "cancellationMark", "cancellation"),
+    "incomeClassificationsDoc": ("incomeInvoiceClassification", "classificationMark", "income_classification"),
+    "expensesClassificationsDoc": ("expensesInvoiceClassification", "classificationMark", "expense_classification"),
+    "paymentMethodsDoc": ("paymentMethods", "paymentMethodMark", "payment"),
+}
+
+
+def parse_change(element, event_field, kind):
+    invoice_mark = positive_mark(text(element, "invoiceMark"), "invoiceMark μεταβολής")
+    event_value = text(element, event_field)
+    event_mark = positive_mark(event_value, event_field) if event_value is not None else None
+    cancelled_on = None
+    if kind == "cancellation":
+        if event_mark is None:
+            raise ParseError("Λείπει το cancellationMark ακύρωσης.")
+        cancelled_on = text(element, "cancellationDate")
+        try:
+            if not cancelled_on or date.fromisoformat(cancelled_on).isoformat() != cancelled_on:
+                raise ValueError
+        except ValueError:
+            raise ParseError("Μη έγκυρη cancellationDate ακύρωσης.") from None
+    return DocumentChange(kind, event_mark, invoice_mark,
+                          ET.tostring(element, encoding="unicode"), cancelled_on)
 
 
 def parse_response(data: bytes) -> Page:
@@ -117,9 +160,16 @@ def parse_response(data: bytes) -> Page:
                "paymentMethodsDoc"}
     if any(local_name(e.tag) not in allowed for e in root):
         raise ParseError("Η απόκριση περιέχει μη υποστηριζόμενο τμήμα XML.")
-    if any(len(e) for e in root
-           if local_name(e.tag) not in {"continuationToken", "invoicesDoc"}):
-        raise ParseError("Η ΑΑΔΕ επέστρεψε XML με ακυρώσεις/χαρακτηρισμούς/πληρωμές. Ο parser της εφαρμογής δεν τα υποστηρίζει ακόμη· δεν πρόκειται για έλεγχο λανθασμένων credentials. Η πρόοδος δεν προχώρησε.")
+    changes = []
+    for section in root:
+        definition = CHANGE_SECTIONS.get(local_name(section.tag))
+        if definition is None:
+            continue
+        element_name, event_field, kind = definition
+        for element in section:
+            if local_name(element.tag) != element_name:
+                raise ParseError("Μη αναμενόμενη δομή ενότητας μεταβολών RequestDocs.")
+            changes.append(parse_change(element, event_field, kind))
     containers = [e for e in root if local_name(e.tag) == "invoicesDoc"]
     invoices = []
     for container in containers:
@@ -136,4 +186,4 @@ def parse_response(data: bytes) -> Page:
         if not partition or not row:
             raise ParseError("Ελλιπές continuation token· δεν αποθηκεύτηκε πρόοδος.")
         continuation = (partition, row)
-    return Page(tuple(invoices), continuation)
+    return Page(tuple(invoices), continuation, tuple(changes))

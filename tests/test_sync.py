@@ -85,7 +85,7 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(ParseError):
             parse_response(b"<RequestedDoc><continuationToken><nextRowKey>r</nextRowKey></continuationToken></RequestedDoc>")
 
-    def test_unsupported_changes_fail_closed(self):
+    def test_incomplete_change_fails_closed(self):
         with self.assertRaises(ParseError):
             parse_response(b"<RequestedDoc><cancelledInvoicesDoc><cancelledInvoice/></cancelledInvoicesDoc></RequestedDoc>")
 
@@ -294,6 +294,8 @@ class APITests(unittest.TestCase):
             {"mark": ["42"], "nextPartitionKey": ["p+1"], "nextRowKey": ["r/2"]})
         self.assertEqual(request.get_header("Aade-user-id"), self.creds.user_id)
         self.assertEqual(request.get_header("Ocp-apim-subscription-key"), self.creds.subscription_key)
+        self.assertEqual(request.get_header("Content-type"), "text/xml")
+        self.assertEqual(request.get_header("Accept"), "application/xml, text/xml")
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 17)
 
     def test_http_errors_are_structured_and_do_not_leak_secrets(self):

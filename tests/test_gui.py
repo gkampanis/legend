@@ -7,6 +7,68 @@ import unittest
 
 @unittest.skipUnless(os.environ.get("DISPLAY") or os.name == "nt", "GUI requires a display (or Xvfb)")
 class GUITests(unittest.TestCase):
+    def test_copy_error_history_and_filter_clients(self):
+        import tkinter as tk
+        from myinvoices.database import Database
+        from myinvoices.gui import App
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "gui.sqlite3")
+            first = database.add_client("Αθήνα", "000000000")
+            second = database.add_client("Πάτρα", "111111111")
+            from test_changes import mixed_page
+            from myinvoices.xml_parser import parse_response
+            database.commit_page(database.checkpoint(first.id), parse_response(mixed_page()))
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                app = App(root, database)
+                deadline = time.monotonic() + 10
+                while app.busy and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.01)
+                self.assertFalse(app.busy)
+                self.assertEqual(len(app.changes_tree.get_children()), 4)
+                invoice_row = app.document_tree.get_children()[0]
+                self.assertEqual(app.document_tree.item(invoice_row, "values")[-1], "Ακυρωμένο (myDATA)")
+                from unittest.mock import patch
+                from myinvoices.models import ParseError
+                def failed_check(*_args, **kwargs):
+                    kwargs["stage"]("xml")
+                    raise ParseError("Μη αναμενόμενη απόκριση RequestDocs [XML_ROOT=Error].", "Error")
+                with patch("myinvoices.gui.check_client", side_effect=failed_check):
+                    app.check_button.invoke()
+                    deadline = time.monotonic() + 10
+                    while app.busy and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+                    self.assertFalse(app.busy)
+                self.assertIn("[xml]", app.last_error)
+                self.assertIn("XML_ROOT=Error", app.message_text.get("1.0", "end"))
+                app.copy_error_button.invoke()
+                self.assertEqual(root.clipboard_get(), app.last_error)
+                self.assertTrue((Path(directory) / "diagnostics.jsonl").exists())
+                message = "[xml] Μη αναμενόμενη απόκριση RequestDocs [XML_ROOT=Error]."
+                app._message(message, error=True)
+                app._message("Εργασία ολοκληρώθηκε")
+                app.copy_error_button.invoke()
+                self.assertEqual(root.clipboard_get(), message)
+                app._copy_messages()
+                self.assertIn(message, root.clipboard_get())
+                self.assertIn("Εργασία ολοκληρώθηκε", root.clipboard_get())
+                self.assertEqual(str(app.message_text.cget("state")), "disabled")
+                app._select_messages()
+                self.assertTrue(app.message_text.tag_ranges("sel"))
+                app.client_filter.set("ΠΑΤΡ")
+                self.assertEqual(app.client_tree.get_children(), (second.id,))
+                app.client_filter.set("000000000")
+                self.assertEqual(app.client_tree.get_children(), (first.id,))
+                app._clear_messages()
+                self.assertEqual(app.message_text.get("1.0", "end-1c"), "")
+                self.assertEqual(app.last_error, "")
+                self.assertEqual(str(app.copy_error_button.cget("state")), "disabled")
+            finally:
+                root.destroy()
+
     def test_client_form_loads_and_saves_only_selected_credentials(self):
         import tkinter as tk
         from tkinter import ttk

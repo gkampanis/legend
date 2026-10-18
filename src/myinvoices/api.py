@@ -61,7 +61,8 @@ class RequestDocsAPI:
             self.environment.value + "/RequestDocs?" + urlencode(query),
             headers={"aade-user-id": self.credentials.user_id,
                      "Ocp-Apim-Subscription-Key": self.credentials.subscription_key,
-                     "Accept": "application/xml"}, method="GET",
+                     "Content-Type": "text/xml",
+                     "Accept": "application/xml, text/xml"}, method="GET",
         )
         try:
             with self.opener.open(request, timeout=self.timeout) as response:

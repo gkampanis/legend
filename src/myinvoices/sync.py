@@ -34,7 +34,7 @@ class Synchronizer:
                 stage("database")
             checkpoint = self.database.commit_page(checkpoint, page)
             pages += 1
-            records += len(page.invoices)
+            records += len(page.invoices) + len(page.changes)
             if progress:
                 progress(pages, records)
             if page.continuation is None:

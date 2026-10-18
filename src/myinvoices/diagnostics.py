@@ -7,6 +7,7 @@ import traceback
 
 
 def record_failure(path, error, stage):
+    from .xml_parser import DIAGNOSTIC_ROOTS
     allowed_stages = {"local", "credentials", "request", "xml", "database", "gui"}
     entry = {
         "at": datetime.now(timezone.utc).isoformat(),
@@ -14,6 +15,7 @@ def record_failure(path, error, stage):
         "exception_type": type(error).__name__ if type(error).__module__ in
                           {"builtins", "sqlite3", "_tkinter", "myinvoices.models", "myinvoices.api"} else "Error",
         "http_status": getattr(error, "status", None) if isinstance(getattr(error, "status", None), int) else None,
+        "xml_root": getattr(error, "root_kind", None) if getattr(error, "root_kind", None) in DIAGNOSTIC_ROOTS | {"UNKNOWN"} else None,
         "frames": [{"file": Path(f.filename).name, "function": f.name, "line": f.lineno}
                    for f in traceback.extract_tb(error.__traceback__)
                    if Path(f.filename).parent.name == "myinvoices"],

@@ -91,3 +91,23 @@ The cloud checks did not expose usable secret bindings, while the Product Owner 
 CHECK_AADE.bat now runs a local, explicitly initiated check using the existing per-client credentials on the user's own PC and their saved API environment. It performs one today's-date RequestDocs request, checks the XML envelope, and does not save invoice data or advance synchronization state. It does not require cloud secrets or ask for keys in the terminal. It keeps the console open for the fixed safe result/status message.
 
 Validation: full offline suite discovered 58 tests: 55 passed, native Windows DPAPI and 2 GUI tests skipped without a display. The 5 new local-check tests all passed, covering saved credentials/environment, unchanged checkpoints, safe results, missing credentials/database, HTTP status propagation and cancellation before a request. Compileall and diff checks passed. This does not constitute native Windows or live AADE validation.
+
+## Follow-up v0.3.0 — copyable diagnostics, UI and mixed records
+
+The Product Owner's exact production message was “unexpected RequestDocs response”. That identifies the envelope root check, not the old mixed-section rejection. No specific live root has been obtained or accepted as valid. Diagnostic errors now identify known technical root names as XML_ROOT, use UNKNOWN for arbitrary names, and still reject unexpected roots without advancing progress. No XML body or credentials enter the error log/clipboard.
+
+The independent known limitation of mixed sections has also been removed: supported cancellation/classification/payment records are durably preserved with invoice references, optional event marks and raw XML. Checkpoints use actual event marks when present. An absent optional event mark is not guessed; canonical XML hashing supplies idempotent identity. Full accounting interpretation of classification/payment content remains outside this change. Unknown or invalid sections still fail closed.
+
+SQLite schema 2 is additive. A consistent schema-1 backup is written and quick-checked before migration. Regression tests verify original client, invoice and checkpoint preservation, backup version, repeatability, and rollback of invoice/change/checkpoint writes together.
+
+UI changes: larger fonts/rows, accent-insensitive client search, client scrollbar, double-click editing, API connection check button, changes tab, canceled-invoice indicator, persistent scrollable error text with clipboard buttons and Ctrl+A/C, and cleanup of pending Tk timer callbacks when closing. The clipboard test checks the exact full error survives a later status message, plus search and async API-error propagation.
+
+Validation on Linux/Xvfb: 67 discovered, 66 passed, 1 native Windows DPAPI test skipped. During UI testing an accent-normalization failure was diagnosed and fixed, and tests rerun. Compileall, offline smoke check and diff checks passed. Native Windows and real AADE responses remain unverified. The official PDF was read in the earlier research; this turn's re-download returned 403, so field structure was additionally checked against the downstream XSD copy in firebed/aade-mydata, not represented as a new primary-source verification.
+
+## Uploaded aade-mydata 5.13.0 reference review
+
+The user supplied aade-mydata-5.13.0.zip (280,112 bytes; SHA-256 43c47a06846dcfdf7e1c308ff38667c4398a4e12c21aa7e8c988bbfe9a0bc94d). Its 264 archive entries were checked for traversal/symlinks and extracted outside the project. No PHP code, Composer script or bundled instruction was executed.
+
+Inspected composer.json, LICENSE.md, RequestDocs/MyDataGetRequest, MyDataRequest/GuzzleGateway, XMLReader/RequestedDocReader, RequestedDocXmlFactory and RequestedDoc model. The package is PHP 8.1+ / Guzzle / DOM, MIT-licensed; it is a reference rather than a Python runtime dependency. No source code was copied. Headers/endpoints/continuation/entityVatNumber match the documented contract. The Python request now also explicitly sends Content-Type text/xml and accepts both application/xml and text/xml. This is compatibility alignment, not proof of the live error's cause.
+
+The supplied generic XML reader reads child nodes without asserting RequestedDoc as the root and can skip unknown complex types. We deliberately retain explicit response-root/error checks to avoid reporting an unexpected/error document as an empty successful sync. Schema copies in the archive corroborate mixed-section names and optional classification/payment event MARKs. They are downstream copies, not a newly retrieved authoritative AADE publication.

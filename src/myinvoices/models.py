@@ -7,7 +7,9 @@ class ApplicationError(Exception):
 
 
 class ParseError(ApplicationError):
-    pass
+    def __init__(self, message, root_kind=None):
+        super().__init__(message)
+        self.root_kind = root_kind
 
 
 class SyncError(ApplicationError):
@@ -61,9 +63,19 @@ class Invoice:
 
 
 @dataclass(frozen=True)
+class DocumentChange:
+    kind: str
+    event_mark: int | None
+    invoice_mark: int
+    raw_xml: str = field(repr=False)
+    cancellation_date: str | None = None
+
+
+@dataclass(frozen=True)
 class Page:
     invoices: tuple[Invoice, ...]
     continuation: tuple[str, str] | None = field(default=None, repr=False)
+    changes: tuple[DocumentChange, ...] = ()
 
 
 @dataclass(frozen=True)
