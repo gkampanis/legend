@@ -111,3 +111,13 @@ The user supplied aade-mydata-5.13.0.zip (280,112 bytes; SHA-256 43c47a06846dcfd
 Inspected composer.json, LICENSE.md, RequestDocs/MyDataGetRequest, MyDataRequest/GuzzleGateway, XMLReader/RequestedDocReader, RequestedDocXmlFactory and RequestedDoc model. The package is PHP 8.1+ / Guzzle / DOM, MIT-licensed; it is a reference rather than a Python runtime dependency. No source code was copied. Headers/endpoints/continuation/entityVatNumber match the documented contract. The Python request now also explicitly sends Content-Type text/xml and accepts both application/xml and text/xml. This is compatibility alignment, not proof of the live error's cause.
 
 The supplied generic XML reader reads child nodes without asserting RequestedDoc as the root and can skip unknown complex types. We deliberately retain explicit response-root/error checks to avoid reporting an unexpected/error document as an empty successful sync. Schema copies in the archive corroborate mixed-section names and optional classification/payment event MARKs. They are downstream copies, not a newly retrieved authoritative AADE publication.
+
+## Follow-up v0.3.1 — upstream error handling and observed string wrapper
+
+Upstream main was compared against tag v5.13.0. Commit 1244dd9296606f63f1390d88c2faeaf8049b5d09 adds explicit ResponseDoc error handling for success/error HTTP responses. Our HTTP adapter now safely extracts bounded numeric service codes from HTTP-error XML as well as preserving the HTTP status. Invalid/HTML/DTD/oversized error bodies do not mask the transport error or expose body text.
+
+The Product Owner supplied a production diagnostic XML_ROOT=string. A bounded string-envelope decoder now parses escaped XML and validates the inner root; it rejects empty/plaintext strings, malformed/DTD content and more than two nesting levels without checkpoint advancement. Tests cover direct/wrapped equivalence, wrapper limits, safe failure, wrapped ResponseDoc codes and a two-page synchronization end to end. No production payload or credentials were used. The actual inner payload remains unavailable; live resolution is not claimed.
+
+There is no extra authorization/preflight endpoint call. Own-client credentials omit entityVatNumber; only explicit representative mode adds it. UI/help/error messages now state this clearly, and the direct HTTP test asserts one request.
+
+Validation: 75 tests discovered; 71 passed, 4 skipped without a display (3 GUI, 1 native Windows DPAPI). Compileall, smoke demo and diff checks passed. Prior v0.3 GUI validation with Xvfb remains recorded separately; no new native Windows or live AADE verification is claimed.

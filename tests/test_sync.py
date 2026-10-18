@@ -297,6 +297,7 @@ class APITests(unittest.TestCase):
         self.assertEqual(request.get_header("Content-type"), "text/xml")
         self.assertEqual(request.get_header("Accept"), "application/xml, text/xml")
         self.assertEqual(opener.open.call_args.kwargs["timeout"], 17)
+        self.assertEqual(opener.open.call_count, 1)  # No extra authorization/preflight endpoint.
 
     def test_http_errors_are_structured_and_do_not_leak_secrets(self):
         for status in (301, 401, 403, 429, 500):
@@ -307,6 +308,32 @@ class APITests(unittest.TestCase):
                 RequestDocsAPI(self.creds, opener=opener).fetch(0)
             self.assertEqual(raised.exception.status, status)
             self.assertNotIn(self.creds.subscription_key, str(raised.exception))
+
+    def test_http_error_extracts_numeric_aade_codes_from_every_response(self):
+        opener = Mock()
+        body = b"""<ResponseDoc><response><errors><error><code>101</code>
+            <message>SYNTHETIC-KEY</message></error></errors></response>
+            <response><errors><error><code>102</code><message>SYNTHETIC-USER</message>
+            </error></errors></response></ResponseDoc>"""
+        opener.open.side_effect = HTTPError("https://sensitive.example", 400, "private reason", {}, io.BytesIO(body))
+        with self.assertRaises(APIError) as raised:
+            RequestDocsAPI(self.creds, opener=opener).fetch(0)
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(raised.exception.service_codes, ("101", "102"))
+        self.assertIn("Κωδικοί υπηρεσίας ΑΑΔΕ: 101, 102", str(raised.exception))
+        self.assertNotIn("SYNTHETIC", str(raised.exception))
+        self.assertNotIn("sensitive.example", str(raised.exception))
+
+    def test_html_or_invalid_error_body_preserves_original_http_status(self):
+        for body in (b"<html>SYNTHETIC-KEY</html>", b"broken XML",
+                     b'<!DOCTYPE x><ResponseDoc><code>101</code></ResponseDoc>'):
+            opener = Mock()
+            opener.open.side_effect = HTTPError("https://sensitive.example", 403, "private", {}, io.BytesIO(body))
+            with self.subTest(body=body), self.assertRaises(APIError) as raised:
+                RequestDocsAPI(self.creds, opener=opener).fetch(0)
+            self.assertEqual(raised.exception.status, 403)
+            self.assertEqual(raised.exception.service_codes, ())
+            self.assertNotIn("SYNTHETIC", str(raised.exception))
 
     def test_timeout_and_network_errors_are_safe(self):
         for error in (TimeoutError(self.creds.subscription_key), URLError(self.creds.user_id)):

@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .models import ApplicationError, Credentials
-from .xml_parser import MAX_RESPONSE_BYTES
+from .xml_parser import MAX_RESPONSE_BYTES, service_error_codes
 
 
 class Environment(Enum):
@@ -18,9 +18,10 @@ class Environment(Enum):
 
 
 class APIError(ApplicationError):
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, service_codes=()):
         super().__init__(message)
         self.status = status
+        self.service_codes = service_codes
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -68,18 +69,26 @@ class RequestDocsAPI:
             with self.opener.open(request, timeout=self.timeout) as response:
                 status = response.status
                 if status != 200:
-                    raise APIError("Αποτυχία HTTP από την ΑΑΔΕ.", status)
+                    raise APIError(f"Αποτυχία HTTP {status} από την ΑΑΔΕ.", status)
                 body = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise APIError("Υπερβολικά μεγάλη απόκριση ΑΑΔΕ.")
                 return body
         except HTTPError as error:
             status = error.code
-            error.close()
+            try:
+                codes = service_error_codes(error.read(65537))
+            except (OSError, ValueError):
+                codes = ()
+            finally:
+                error.close()
             if status == 401:
                 message = "HTTP 401: απορρίφθηκε η ταυτοποίηση. Ελέγξτε αν τα κλειδιά είναι παραγωγής ή δοκιμαστικού και αν επιλέχθηκε το αντίστοιχο περιβάλλον."
             elif status == 403:
-                message = "HTTP 403: απαγορεύτηκε η πρόσβαση. Ελέγξτε δικαιώματα εκπροσώπησης/ΑΦΜ, περιβάλλον και περιορισμούς δικτύου. Αυτό δεν αποδεικνύει λανθασμένα credentials."
+                if self.credentials.entity_vat:
+                    message = "HTTP 403: απαγορεύτηκε η πρόσβαση στην κλήση με entityVatNumber. Ελέγξτε δικαιώματα εκπροσώπησης, περιβάλλον και περιορισμούς δικτύου."
+                else:
+                    message = "HTTP 403: απαγορεύτηκε η άμεση κλήση RequestDocs. Δεν έγινε ξεχωριστός έλεγχος εκπροσώπησης και δεν στάλθηκε entityVatNumber. Ελέγξτε το περιβάλλον έκδοσης των κλειδιών και περιορισμούς δικτύου."
             elif status == 429:
                 message = "Όριο αιτημάτων ΑΑΔΕ. Δοκιμάστε αργότερα· η πρόοδος διατηρείται."
             elif 300 <= status < 400:
@@ -87,7 +96,9 @@ class RequestDocsAPI:
             else:
                 message = "Σφάλμα HTTP από την ΑΑΔΕ. Η πρόοδος διατηρείται."
             label = "παραγωγή" if self.environment is Environment.PRODUCTION else "δοκιμαστικό"
-            raise APIError(f"{message} Περιβάλλον: {label}.", status) from None
+            suffix = (" Κωδικοί υπηρεσίας ΑΑΔΕ: " + ", ".join(codes[:10])) if codes else ""
+            prefix = "" if message.startswith("HTTP ") else f"HTTP {status}: "
+            raise APIError(f"{prefix}{message} Περιβάλλον: {label}." + suffix, status, codes) from None
         except (TimeoutError, socket.timeout):
             raise APIError("Έληξε το χρονικό όριο σύνδεσης. Δοκιμάστε ξανά.") from None
         except URLError as error:

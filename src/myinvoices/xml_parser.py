@@ -94,7 +94,7 @@ def parse_invoice(element):
     )
 
 
-def read_envelope(data: bytes):
+def parse_xml(data: bytes):
     if len(data) > MAX_RESPONSE_BYTES:
         raise ParseError("Η απόκριση XML υπερβαίνει το επιτρεπόμενο μέγεθος.")
     try:
@@ -110,10 +110,56 @@ def read_envelope(data: bytes):
         raise ParseError(f"Η απόκριση δεν είναι έγκυρο XML (γραμμή {line}, στήλη {column}).") from None
     except ValueError:
         raise ParseError("Μη υποστηριζόμενη δήλωση κωδικοποίησης XML.") from None
+    return root
+
+
+def numeric_error_codes(root):
+    return tuple(sorted({e.text.strip() for e in root.iter()
+        if local_name(e.tag) in {"code", "Code", "statusCode", "StatusCode"} and e.text
+        and 0 < len(e.text.strip()) <= 6 and e.text.strip().isascii() and e.text.strip().isdigit()}))
+
+
+def unwrap_xml(data: bytes):
+    """Decode bounded .NET <string> envelopes, then validate the actual XML root."""
+    for depth in range(3):
+        try:
+            root = parse_xml(data)
+        except ParseError as error:
+            if depth:
+                raise ParseError("XML μέσα σε string: " + str(error), error.root_kind or "string") from None
+            raise
+        if local_name(root.tag) != "string":
+            return root
+        if len(root):
+            raise ParseError("Μη αναμενόμενη απόκριση [XML_ROOT=string, XML_STRING=NESTED_ELEMENT]. Το string δεν περιέχει serialized XML κειμένου.", "string")
+        value = (root.text or "").lstrip("\ufeff \t\r\n")
+        if not value:
+            raise ParseError("Κενή απόκριση [XML_ROOT=string, XML_STRING=EMPTY]. Δεν επιβεβαιώθηκε λήψη παραστατικών και δεν προχώρησε η πρόοδος.", "string")
+        if not value.startswith("<"):
+            raise ParseError("Απάντηση απλού κειμένου [XML_ROOT=string, XML_STRING=TEXT], όχι XML παραστατικών. Το περιεχόμενο δεν εμφανίζεται για προστασία δεδομένων.", "string")
+        if depth == 2:
+            raise ParseError("Υπερβολικά εμφωλευμένη απόκριση XML_ROOT=string. Δεν προχώρησε η πρόοδος.", "string")
+        data = value.encode("utf-8")
+
+
+def service_error_codes(data: bytes):
+    """Bounded, non-raising HTTP-error inspection without exposing the response text."""
+    if len(data) > 65536:
+        return ()
+    try:
+        root = unwrap_xml(data)
+    except ParseError:
+        return ()
+    if local_name(root.tag) not in {"ResponseDoc", "Error", "error", "ErrorResponse", "Response"}:
+        return ()
+    return numeric_error_codes(root)
+
+
+def read_envelope(data: bytes):
+    root = unwrap_xml(data)
     if local_name(root.tag) != "RequestedDoc":
         if local_name(root.tag) in {"ResponseDoc", "Error", "error", "ErrorResponse", "Response"}:
-            codes = sorted({e.text.strip() for e in root.iter() if local_name(e.tag) in {"code", "Code", "statusCode", "StatusCode"}
-                            and e.text and e.text.strip().isascii() and e.text.strip().isdigit()})
+            codes = numeric_error_codes(root)
             suffix = (" Κωδικοί: " + ", ".join(codes[:10])) if codes else ""
             label = local_name(root.tag)
             raise ParseError(f"Απάντηση XML σφάλματος/κατάστασης [XML_ROOT={label}] αντί για RequestedDoc. Δεν αποθηκεύτηκε πρόοδος." + suffix, label)

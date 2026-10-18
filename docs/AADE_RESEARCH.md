@@ -83,3 +83,13 @@ GET https://mydataapidev.aade.gr/RequestDocs
 Επιβεβαιώθηκαν ίδια endpoints και auth headers, ημερομηνίες dd/MM/yyyy, entityVatNumber και continuation fields. Προστέθηκε ρητό Content-Type text/xml στον δικό μας adapter, όπως χρησιμοποιεί το πακέτο, διατηρώντας TLS verification και αποκλεισμό redirects για credentials. Δεν ισχυριζόμαστε ότι αυτή η διαφορά εξηγεί την πραγματική μη αναμενόμενη απόκριση.
 
 Σημαντική διαφορά: ο XMLReader της βιβλιοθήκης δεν ελέγχει ρητά το όνομα της ρίζας και μπορεί να παραλείψει άγνωστα σύνθετα στοιχεία. Αυτό δεν υιοθετήθηκε ως λύση του σφάλματος· ο δικός μας parser εξακολουθεί να απαιτεί αναγνωρισμένο envelope και να αναφέρει ασφαλές XML_ROOT/αριθμητικούς κωδικούς υπηρεσίας, χωρίς XML body.
+
+## Σύγκριση v5.13.0 με το upstream HEAD και πραγματικό XML_ROOT=string
+
+Ελέγχθηκε το repository που έστειλε ο χρήστης και έγινε diff του tag v5.13.0 με το HEAD `1244dd9296606f63f1390d88c2faeaf8049b5d09` (2026-10-18, “fix: report myDATA errors instead of empty results, fix the QR status lookup”). Η αλλαγή προσθέτει ErrorResponseException και ελέγχει ResponseDoc τόσο σε HTTP 200 όσο και σε HTTP errors. Διασταυρώθηκαν ο exception parser, GuzzleGateway, XMLReader και τα σχετικά synthetic stubs/tests.
+
+Πηγή: https://github.com/firebed/aade-mydata/commit/1244dd9296606f63f1390d88c2faeaf8049b5d09
+
+Δεν αντιγράφηκαν κώδικας ή μηνύματα με δεδομένα. Η Python υλοποίηση εξάγει μόνο οριοθετημένους αριθμητικούς κωδικούς από το XML σφάλματος και διατηρεί το HTTP status.
+
+Ο χρήστης έδωσε πλέον πραγματικό diagnostic root `string` στην παραγωγή. Η υποστήριξη wrapper επιτρέπει serialized XML μέσα στο string, επαληθεύοντας υποχρεωτικά και το εσωτερικό έγγραφο. Το πραγματικό περιεχόμενο του string δεν έχει κοινοποιηθεί· δεν ισχυριζόμαστε ότι γνωρίζουμε αν περιείχε XML, κενό string ή απλό μήνυμα. Η νέα έκδοση τα ξεχωρίζει χωρίς να εκθέτει περιεχόμενο. Δεν μετατρέπει αυθαίρετο root σε επιτυχία.

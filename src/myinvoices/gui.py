@@ -42,7 +42,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.3 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.3.1 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -362,7 +362,7 @@ class App:
                 f"Θα γίνουν πραγματικά, μόνο αναγνωστικά αιτήματα στο {ENVIRONMENTS[client.environment]}.\n"
                 f"Πελάτης: {client.name} · ΑΦΜ: {client.vat}\n\n"
                 "Θα χρησιμοποιηθούν τα αποθηκευμένα credentials του πελάτη. "
-                "Απαιτείται δικαίωμα πρόσβασης/εκπροσώπησης στην ΑΑΔΕ. Συνέχεια;",
+                "Η άντληση γίνεται απευθείας με RequestDocs, χωρίς προηγούμενη κλήση ελέγχου εξουσιοδότησης. Συνέχεια;",
                 parent=self.root):
                 return
             api = None
@@ -454,12 +454,12 @@ class App:
         ttk.Radiobutton(frame, text="Δοκιμαστικό ΑΑΔΕ", variable=environment, value="development", state=radio_state).grid(row=4, column=0)
         if not self.demo:
             ttk.Radiobutton(frame, text="Παραγωγή ΑΑΔΕ", variable=environment, value="production", state=radio_state).grid(row=4, column=1)
-        ttk.Checkbutton(frame, text="Εξουσιοδοτημένος λογιστής / εκπρόσωπος (entityVatNumber)",
+        ttk.Checkbutton(frame, text="Χρησιμοποιώ κλειδιά λογιστή / εκπροσώπου για άλλον ΑΦΜ",
             variable=representative, state="disabled" if self.demo else "normal").grid(row=5, column=0, columnspan=2, pady=6)
         persistence = ("Windows: τα credentials αποθηκεύονται κρυπτογραφημένα για τον τρέχοντα χρήστη."
                        if self.credentials.persistent else "Σε αυτό το σύστημα: credentials μόνο στη μνήμη, μέχρι να κλείσει η εφαρμογή.")
         ttk.Label(frame, text=persistence, wraplength=580).grid(row=6, column=0, columnspan=2, sticky="w")
-        ttk.Label(frame, text="Κλειδιά από το κανονικό myDATA: Παραγωγή ΑΑΔΕ. Κλειδιά από το dev portal: Δοκιμαστικό ΑΑΔΕ.\nΤο ΑΦΜ μένει σταθερό. Αλλαγή περιβάλλοντος επιτρέπεται πριν τον πρώτο αποθηκευμένο συγχρονισμό.",
+        ttk.Label(frame, text="Με κλειδιά του ίδιου του πελάτη αφήστε την επιλογή εκπροσώπησης κλειστή.\nΚανονικό myDATA: Παραγωγή ΑΑΔΕ. Dev portal: Δοκιμαστικό ΑΑΔΕ.\nΤο ΑΦΜ μένει σταθερό. Αλλαγή περιβάλλοντος επιτρέπεται πριν τον πρώτο αποθηκευμένο συγχρονισμό.",
                   wraplength=580).grid(row=7, column=0, columnspan=2, sticky="w", pady=5)
         if self.demo:
             ttk.Label(frame, text="OFFLINE DEMO: τα API credentials δεν χρησιμοποιούνται.").grid(row=8, column=0, columnspan=2)

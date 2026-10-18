@@ -16,6 +16,8 @@ def record_failure(path, error, stage):
                           {"builtins", "sqlite3", "_tkinter", "myinvoices.models", "myinvoices.api"} else "Error",
         "http_status": getattr(error, "status", None) if isinstance(getattr(error, "status", None), int) else None,
         "xml_root": getattr(error, "root_kind", None) if getattr(error, "root_kind", None) in DIAGNOSTIC_ROOTS | {"UNKNOWN"} else None,
+        "aade_codes": [c for c in getattr(error, "service_codes", ())
+                       if isinstance(c, str) and 0 < len(c) <= 6 and c.isascii() and c.isdigit()],
         "frames": [{"file": Path(f.filename).name, "function": f.name, "line": f.lineno}
                    for f in traceback.extract_tb(error.__traceback__)
                    if Path(f.filename).parent.name == "myinvoices"],
