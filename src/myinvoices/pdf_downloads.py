@@ -14,10 +14,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 import uuid
+from datetime import date
 from typing import NamedTuple
 
 from .models import ApplicationError
 from .provider_documents import MAX_DESCRIPTOR_BYTES, ResolutionError, resolve_document
+from .local_files import client_archive_folder
 
 MAX_BYTES = 40 * 1024 * 1024
 SAVED_STATES = ('saved_unverified','imported_unverified','printed_unverified')
@@ -34,6 +36,7 @@ INTERACTIVE_STATES = {'challenge','http_403','browser_required','browser_timeout
     'browser_download_failed','browser_confirmation','html_page','descriptor_limit','invalid_descriptor','ambiguous_document','browser_unavailable','print_not_invoice','print_viewer_unsupported','print_timeout','print_failed'}
 
 LABELS = {
+    'archive_date_invalid': 'Δεν αποθηκεύτηκε PDF: μη έγκυρη ημερομηνία έκδοσης',
     'printed_unverified': 'PDF από εκτύπωση',
     'artifact_missing': 'Το αποθηκευμένο αρχείο δεν βρέθηκε',
     'artifact_changed': 'Το αποθηκευμένο αρχείο έχει αλλάξει',
@@ -73,20 +76,44 @@ def open_provider(database, client, mark, browser=None):
     row = database.invoice(client.id, mark)
     if not row['download_url']:
         raise ApplicationError('Το παραστατικό δεν έχει επίσημο σύνδεσμο παρόχου.')
+    # This action only hands the exact AADE-returned link to the user's browser.
+    # No DNS preflight, provider request, polling or download is performed here.
     try:
-        validate_url(row['download_url'])
-    except Pending as error:
-        raise ApplicationError(state_label(error.state)) from None
+        parts = urlsplit(row['download_url'])
+        if (parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password
+                or parts.port == 0 or any(ord(c) < 33 for c in row['download_url'])):
+            raise ValueError()
+    except ValueError:
+        raise ApplicationError('Ο σύνδεσμος του παραστατικού δεν είναι έγκυρος σύνδεσμος ιστοσελίδας.') from None
     if not (browser or webbrowser.open)(row['download_url'], new=2):
         raise ApplicationError('Δεν άνοιξε ο browser. Ελέγξτε τον προεπιλεγμένο browser των Windows.')
 
 
 def archive_folder(root, client, row):
     supplier = ''.join(c for c in (row['issuer_vat'] or '') if c.isascii() and c.isalnum())[:32] or 'Αγνωστος'
-    client_folder = client.vat if client.environment == 'production' else f'{client.vat}_ΔΟΚΙΜΑΣΤΙΚΟ'
-    folder = Path(root) / client_folder / supplier
+    try:
+        month = date.fromisoformat(str(row['issue_date'])).strftime('%Y-%m')
+    except (KeyError, ValueError, TypeError):
+        raise Pending('archive_date_invalid') from None
+    folder = client_archive_folder(root, client) / month / supplier
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def saved_pdf_path(database, client, mark):
+    row = database.invoice(client.id, mark)
+    source_hash = hashlib.sha256((row['download_url'] or '').encode()).hexdigest()
+    saved = database.saved_pdf(client.id, mark, source_hash)
+    if not saved or not saved['path']:
+        raise ApplicationError('Δεν έχει αποθηκευτεί PDF για αυτό το παραστατικό.')
+    path = Path(saved['path'])
+    try:
+        if (not path.is_symlink() and path.is_file() and path.stat().st_size == saved['byte_count']
+                and digest_file(path) == saved['sha256']):
+            return path
+    except OSError:
+        pass
+    raise ApplicationError('Το αποθηκευμένο PDF λείπει ή έχει αλλάξει. Εκτελέστε ξανά Λήψη PDF.')
 
 
 def publish_pdf(temporary, folder, mark, cancel):

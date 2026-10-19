@@ -186,53 +186,89 @@ class PDFClassificationGUITests(unittest.TestCase):
         self.assertEqual(self.app.offsets, {'all':0,'success':0,'failure':0})
         self.assertTrue(all(not tree.get_children() for tree in self.app.document_trees.values()))
 
-    def test_human_print_confirmation_preserves_provenance_and_moves_tabs(self):
-        import io
-        from unittest.mock import patch
+    def test_open_saved_pdf_from_success_tab_uses_legacy_location(self):
+        import io, time
         from pypdf import PdfWriter
         from myinvoices.gui import App
         add_invoices(self.db,self.client,[100])
-        record_attempt(self.db,self.client,100,'challenge')
-        self.app = App(self.root,self.db,today=date(2026,11,1))
-        self.wait()
-        self.assertEqual(self.app.failure_tree.get_children(),('100',))
+        legacy=self.directory/'previous-archive'/'100.pdf'
+        legacy.parent.mkdir()
         writer=PdfWriter()
-        writer.add_blank_page(width=100,height=100)
-        stream=io.BytesIO()
-        writer.write(stream)
-        downloads=self.directory/'Downloads'
-        downloads.mkdir()
-        self.app.browser_download_folder=str(downloads)
-        self.app.download_roots[self.client.id]=str(self.directory/'archive')
-        def printed(*args,**kwargs):
-            (downloads/'printed.pdf').write_bytes(stream.getvalue())
-        with patch('myinvoices.interactive_downloads.open_provider',side_effect=printed), patch.object(self.app,'_ask_pdf_provenance',return_value='printed') as confirm:
-            self.app.browser_pdf_button.invoke()
-            self.wait()
-            confirm.assert_called_once()
-        self.assertEqual(self.app.success_tree.get_children(),('100',))
-        self.assertEqual(self.app.success_tree.set('100','method'),'Εκτύπωση σε PDF')
-        self.assertEqual(self.app.failure_tree.get_children(),())
-        self.assertEqual(self.db.invoices(self.client.id)[0]['pdf_state'],'printed_unverified')
-        self.assertIn('Από εκτύπωση: 1',self.app.message_text.get('1.0','end'))
-        self.assertTrue((downloads/'printed.pdf').is_file())
-
-    def test_print_choice_dialog_returns_printed_without_boolean_coercion(self):
-        import tkinter as tk
-        from tkinter import ttk
-        from myinvoices.gui import App
-        self.app = App(self.root,self.db,today=date(2026,11,1))
+        writer.add_blank_page(width=100,height=160)
+        writer.add_blank_page(width=160,height=100)
+        stream=io.BytesIO();writer.write(stream)
+        legacy.write_bytes(stream.getvalue())
+        source=hashlib.sha256(self.db.invoice(self.client.id,100)['download_url'].encode()).hexdigest()
+        self.db.record_pdf(self.client.id,100,'printed_unverified',source,str(legacy),
+                           hashlib.sha256(stream.getvalue()).hexdigest(),len(stream.getvalue()))
+        self.app=App(self.root,self.db,today=date(2026,11,1))
         self.wait()
-        def choose_printed():
-            def visit(widget):
-                for child in widget.winfo_children():
-                    if isinstance(child,ttk.Button) and child.cget('text')=='PDF από εκτύπωση':
-                        child.invoke()
-                        return True
-                    if visit(child):
-                        return True
-                return False
-            self.assertTrue(any(visit(dialog) for dialog in self.root.winfo_children() if isinstance(dialog,tk.Toplevel)))
-        self.root.after(50,choose_printed)
-        self.assertEqual(self.app._ask_pdf_provenance({'mark':100},Path('printed.pdf')),'printed')
-        self.assertEqual(self.errors,[])
+        self.select_bucket('success')
+        self.app.success_tree.selection_set('100')
+        self.app.open_pdf_button.invoke()
+        self.wait()
+        preview=self.app.pdf_preview
+        deadline=time.monotonic()+10
+        while preview.busy and time.monotonic()<deadline:
+            self.root.update();time.sleep(0.01)
+        self.assertFalse(preview.busy)
+        self.assertEqual(preview.count,2)
+        self.assertEqual(preview.path,legacy)
+        self.assertIsNotNone(preview.photo)
+        self.assertEqual(legacy.read_bytes(),stream.getvalue())
+        self.assertEqual(self.db.count(self.client.id,bucket='success'),1)
+        preview.window.destroy()
+        self.assertTrue(preview.cancel.is_set())
+        self.assertIsNone(preview.poll_id)
+
+    def test_folder_button_uses_desktop_or_selected_client_override(self):
+        from unittest.mock import patch
+        from myinvoices.gui import App
+        self.app=App(self.root,self.db,today=date(2026,11,1))
+        self.wait()
+        desktop=self.directory/'OneDrive'/'Desktop'
+        def mkdir(path):
+            path.mkdir(parents=True,exist_ok=True)
+        with patch('myinvoices.gui.desktop_directory',return_value=desktop), \
+                patch('myinvoices.gui.open_directory',side_effect=mkdir) as opened:
+            self.app.open_folder_button.invoke()
+            self.wait()
+            expected=desktop/'000000000_ΔΟΚΙΜΑΣΤΙΚΟ'
+            opened.assert_called_once_with(expected)
+            self.assertTrue(expected.is_dir())
+            self.assertEqual(self.app.download_roots[self.client.id],str(desktop))
+            custom=self.directory/'custom'
+            self.app.download_roots[self.client.id]=str(custom)
+            self.app.open_folder_button.invoke()
+            self.wait()
+            self.assertEqual(opened.call_args.args,(custom/'000000000_ΔΟΚΙΜΑΣΤΙΚΟ',))
+
+    def test_download_defaults_to_desktop_and_keeps_invoice_months(self):
+        import io, socket
+        from unittest.mock import patch
+        from pypdf import PdfWriter
+        import test_pdf_downloads as helpers
+        from myinvoices.gui import App
+        from myinvoices.pdf_downloads import PDFDownloader
+        add_invoices(self.db,self.client,[100])
+        add_invoices(self.db,self.client,[101],date='2026-09-30')
+        writer=PdfWriter();writer.add_blank_page(width=100,height=100)
+        data=io.BytesIO();writer.write(data)
+        desktop=self.directory/'Desktop'
+        self.app=App(self.root,self.db,today=date(2026,11,1))
+        self.wait()
+        def downloader(database,**kwargs):
+            return PDFDownloader(database,helpers.Opener(data.getvalue()))
+        with patch('myinvoices.gui.desktop_directory',return_value=desktop), \
+                patch('myinvoices.gui.AutomaticPDFDownloader',side_effect=downloader), \
+                patch('myinvoices.pdf_downloads.socket.getaddrinfo',return_value=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('8.8.8.8',443))]), \
+                patch('myinvoices.gui.filedialog.askdirectory',side_effect=AssertionError('Default must not prompt')):
+            self.app.pdf_button.invoke();self.wait()
+            self.assertEqual(len(list(desktop.rglob('*.pdf'))),1)
+            self.app._clear_dates();self.wait()
+            self.app.pdf_button.invoke();self.wait()
+        paths={p.relative_to(desktop) for p in desktop.rglob('*.pdf')}
+        self.assertEqual(paths,{
+            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-10/111111111/100.pdf'),
+            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-09/111111111/101.pdf')})
+        self.assertEqual(self.app.bucket_totals['success'],2)

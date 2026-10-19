@@ -226,6 +226,7 @@ class GUITests(unittest.TestCase):
                 self.assertEqual(app.total,1)
                 self.assertEqual(app.document_tree.get_children(),('101',))
                 app.document_tree.selection_set('101')
+                app.download_roots[client.id]=str(folder/'archive')
                 with patch('myinvoices.gui.open_provider') as browser:
                     app._open_provider()
                     wait()
@@ -239,12 +240,12 @@ class GUITests(unittest.TestCase):
                     app.pdf_button.invoke()
                     wait()
                 self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
-                app.document_tree.selection_remove(*app.document_tree.selection())
-                with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.InteractivePDFDownloader',side_effect=lambda database, *args, **kwargs: PDFDownloader(database,Opener(stream.getvalue()))) as browser_batch:
+                app.document_tree.selection_set('101')
+                with patch('myinvoices.gui.open_provider') as browser:
                     app.browser_pdf_button.invoke()
                     wait()
-                    self.assertEqual(browser_batch.call_count,1)
-                self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
+                    browser.assert_called_once_with(db,client,101)
+                self.assertIn('Άνοιξε ο σύνδεσμος',app.status.get())
                 app.date_from.set('31/02/2026')
                 app._apply_dates()
                 self.assertIn('ΗΗ/ΜΜ/ΕΕΕΕ',app.last_error)
@@ -274,15 +275,15 @@ class GUITests(unittest.TestCase):
                 self.assertFalse(app.busy)
                 self.assertEqual((app.date_from.get(),app.date_to.get()),('01/09/2026','30/09/2026'))
                 self.assertEqual([button.cget('text') for button in (app.sync_button,app.pdf_button,app.browser_pdf_button)],
-                                 ['1. Εύρεση παραστατικών','2. Λήψη PDF','3. Εκκρεμή στον browser'])
+                                 ['1. Εύρεση παραστατικών','2. Λήψη PDF','3. Άνοιγμα στον browser'])
                 self.assertEqual((app.stat_total.get(),app.stat_saved.get(),app.stat_pending.get()),('0','0','0'))
                 self.assertEqual(app.stop_button.winfo_manager(),'')
                 self.assertFalse(hasattr(app,'add_button'))
             finally:
                 root.destroy()
 
-    def test_second_pass_confirmation_queue_archives_only_pending_invoice(self):
-        import hashlib,io,threading
+    def test_browser_button_opens_one_exact_link_without_download_loop(self):
+        import hashlib, io, threading
         import tkinter as tk
         from unittest.mock import patch
         from pypdf import PdfWriter
@@ -295,17 +296,11 @@ class GUITests(unittest.TestCase):
             db=Database(directory/'gui.sqlite3')
             client=db.add_client('Synthetic','000000000')
             Synchronizer(db,DemoAPI()).run(client.id,threading.Event())
+            link='https://different-provider.example/102?view=invoice#original'
             with db.connection() as conn:
-                conn.execute("UPDATE invoices SET download_url='https://provider.example/102',status='url_available' WHERE mark=102")
-            writer=PdfWriter();writer.add_blank_page(width=100,height=100)
-            stream=io.BytesIO();writer.write(stream)
-            data=stream.getvalue()
-            existing=directory/'existing.pdf';existing.write_bytes(data)
-            for row in db.download_candidates(client.id):
-                source=hashlib.sha256(row['download_url'].encode()).hexdigest()
-                db.record_pdf(client.id,row['mark'],'saved_unverified' if row['mark']==101 else 'challenge',source,
-                              str(existing) if row['mark']==101 else None,hashlib.sha256(data).hexdigest(),len(data))
-            downloads=directory/'Downloads';downloads.mkdir()
+                conn.execute("UPDATE invoices SET download_url=?,status='url_available' WHERE mark=102",(link,))
+            source=hashlib.sha256(link.encode()).hexdigest()
+            db.record_pdf(client.id,102,'challenge',source)
             root=tk.Tk();root.withdraw()
             errors=[]
             root.report_callback_exception=lambda *error:errors.append(error)
@@ -315,23 +310,29 @@ class GUITests(unittest.TestCase):
                     deadline=time.monotonic()+10
                     while app.busy and time.monotonic()<deadline:
                         root.update();time.sleep(0.01)
+                    root.update()
                     self.assertFalse(app.busy)
                     self.assertEqual(errors,[])
                 wait()
-                self.assertEqual(app.stat_pending.get(),'1')
-                app.download_roots[client.id]=str(directory/'archive')
-                app.browser_download_folder=str(downloads)
-                def opened(database,selected,mark,**kwargs):
-                    self.assertEqual(mark,102)
-                    (downloads/'invoice.pdf').write_bytes(data)
-                with patch('myinvoices.interactive_downloads.open_provider',side_effect=opened) as browser, patch.object(app,'_ask_pdf_provenance',return_value='original') as confirm:
+                app.document_book.select(app.failure_tree.master)
+                root.update()
+                app.failure_tree.selection_set('102')
+                with patch('myinvoices.pdf_downloads.webbrowser.open',return_value=True) as browser, \
+                        patch('myinvoices.pdf_downloads.socket.getaddrinfo',side_effect=AssertionError('No DNS preflight')), \
+                        patch('myinvoices.gui.filedialog.askdirectory',side_effect=AssertionError('No folder picker')), \
+                        patch('myinvoices.gui.AutomaticPDFDownloader',side_effect=AssertionError('No downloader')):
                     app.browser_pdf_button.invoke()
                     wait()
-                    self.assertEqual(browser.call_count,1)
-                    self.assertEqual(confirm.call_count,1)
-                self.assertEqual((app.stat_saved.get(),app.stat_pending.get()),('2','0'))
-                self.assertEqual(len(list((directory/'archive').rglob('*.pdf'))),1)
-                self.assertEqual(existing.read_bytes(),data)
-                self.assertTrue((downloads/'invoice.pdf').exists())
+                    for _ in range(10):
+                        root.update();time.sleep(0.01)
+                    browser.assert_called_once_with(link,new=2)
+                    app.browser_pdf_button.invoke()
+                    wait()
+                    self.assertEqual(browser.call_count,2)
+                self.assertFalse(hasattr(app,'browser_download_folder'))
+                with db.connection() as conn:
+                    self.assertEqual(conn.execute('SELECT count(*) FROM pdf_attempts').fetchone()[0],1)
+                self.assertEqual(app.failure_tree.get_children(),('102',))
+                self.assertFalse(list(directory.rglob('*.pdf')))
             finally:
                 root.destroy()

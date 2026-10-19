@@ -16,10 +16,11 @@ from .diagnostics import record_failure
 from .models import ApplicationError, Credentials
 from .local_check import check_client
 from .sync import Synchronizer
-from .pdf_downloads import PDFDownloader, state_label, open_provider, import_browser_pdf
+from .pdf_downloads import PDFDownloader, state_label, open_provider, import_browser_pdf, saved_pdf_path
 from .date_range import DateRange, previous_month
 from .automatic_downloads import AutomaticPDFDownloader
-from .interactive_downloads import InteractivePDFDownloader
+from .local_files import desktop_directory, client_archive_folder, open_directory
+from .pdf_preview import PDFPreview
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -49,7 +50,7 @@ class App:
         self.date_from = tk.StringVar(value=self.dates.start.strftime('%d/%m/%Y') if self.dates.start else '')
         self.date_to = tk.StringVar(value=self.dates.end.strftime('%d/%m/%Y') if self.dates.end else '')
         self.download_roots = {}
-        self.browser_download_folder = None
+        self.pdf_preview = None
         self.stat_total = tk.StringVar(value='0')
         self.stat_saved = tk.StringVar(value='0')
         self.stat_pending = tk.StringVar(value='0')
@@ -114,7 +115,7 @@ class App:
         ttk.Label(outer, text=title, font=(self.font_family, 17, "bold")).pack(anchor="w")
         notice = ("OFFLINE DEMO: συνθετικά στοιχεία, χωρίς σύνδεση ή λήψη PDF."
                   if self.demo else
-                  "Επιλέξτε πελάτη και περίοδο → εύρεση παραστατικών → λήψη PDF → δεύτερο πέρασμα μόνο για εκκρεμή.")
+                  "Επιλέξτε πελάτη και περίοδο → εύρεση παραστατικών → λήψη PDF. Επιλέξτε μία εγγραφή για άνοιγμα PDF ή συνδέσμου.")
         ttk.Label(outer, text=notice, wraplength=1050).pack(anchor="w", pady=(4, 10))
         if self.demo:
             ttk.Label(outer, text="Για ενεργά πεδία API: κλείστε το demo και ανοίξτε START_MYINVOICES.bat.",
@@ -128,6 +129,7 @@ class App:
         menu.add_cascade(label="Πελάτης",menu=clients_menu)
         tools = tk.Menu(menu,tearoff=False)
         for text,command in (("Έλεγχος σύνδεσης API",self._check_api),("Άνοιγμα επιλεγμένου στον browser",self._open_provider),
+                             ("Άνοιγμα αποθηκευμένου PDF",self._open_saved_pdf),("Φάκελος τιμολογίων",self._open_archive_folder),
                              ("Χειροκίνητη εισαγωγή PDF…",self._import_pdf),("Επιλογή φακέλου PDF…",self._choose_destination),
                              ("Προηγούμενος μήνας",self._previous_month),("Όλες οι ημερομηνίες",self._clear_dates),
                              ("Εφαρμογή περιόδου στη λίστα",self._apply_dates)):
@@ -164,7 +166,7 @@ class App:
         actions.pack(side="right",padx=(10,0),fill="y")
         self.sync_button = ttk.Button(actions,text="1. Εύρεση παραστατικών",command=self._sync)
         self.pdf_button = ttk.Button(actions,text="2. Λήψη PDF",command=self._download_pdfs)
-        self.browser_pdf_button = ttk.Button(actions,text="3. Εκκρεμή στον browser",command=lambda:self._download_pdfs(browser=True))
+        self.browser_pdf_button = ttk.Button(actions,text="3. Άνοιγμα στον browser",command=self._open_provider)
         for button in (self.sync_button,self.pdf_button,self.browser_pdf_button):
             button.pack(fill="x",pady=2)
         body = ttk.Panedwindow(outer, orient="horizontal")
@@ -215,6 +217,7 @@ class App:
             documents.rowconfigure(0, weight=1)
             documents.columnconfigure(0, weight=1)
             self.document_trees[bucket] = tree
+            tree.bind('<Double-1>', lambda _event: self._open_saved_pdf())
         # Keep the original name for the complete invoice list.
         self.document_tree = self.document_trees["all"]
         self.success_tree, self.failure_tree = self.document_trees["success"], self.document_trees["failure"]
@@ -237,6 +240,12 @@ class App:
         self.changes_tree.configure(yscrollcommand=changes_scroll.set)
         changes_scroll.pack(side="right", fill="y")
         self.changes_tree.pack(side="left", fill="both", expand=True)
+        file_actions = ttk.Frame(right)
+        file_actions.pack(fill='x', pady=(6, 2))
+        self.open_pdf_button = ttk.Button(file_actions, text='Άνοιγμα PDF', command=self._open_saved_pdf)
+        self.open_pdf_button.pack(side='left', padx=(0, 8))
+        self.open_folder_button = ttk.Button(file_actions, text='Φάκελος τιμολογίων', command=self._open_archive_folder)
+        self.open_folder_button.pack(side='left')
         paging = ttk.Frame(right)
         paging.pack(fill="x", pady=6)
         self.previous = ttk.Button(paging, text="Προηγούμενα", command=lambda: self._page(-1))
@@ -307,7 +316,8 @@ class App:
 
     def _set_busy(self, value):
         self.busy = value
-        for widget in (self.sync_button,self.pdf_button,self.browser_pdf_button,self.from_entry,self.to_entry,self.search_entry,self.previous,self.next):
+        for widget in (self.sync_button,self.pdf_button,self.browser_pdf_button,self.open_pdf_button,self.open_folder_button,
+                       self.from_entry,self.to_entry,self.search_entry,self.previous,self.next):
             widget.configure(state="disabled" if value else "normal")
         for index in (0,1):
             self.main_menu.entryconfigure(index,state="disabled" if value else "normal")
@@ -345,13 +355,7 @@ class App:
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
-                if kind == "confirm_pdf":
-                    row,path,event,reply = payload
-                    try:
-                        reply.append(self._ask_pdf_provenance(row, path))
-                    finally:
-                        event.set()
-                elif kind == "browser_notice":
+                if kind == "browser_notice":
                     self._message(payload)
                 elif kind == "pdf_progress":
                     done, total = payload
@@ -535,50 +539,6 @@ class App:
         if folder:
             self.download_roots[self.selected]=folder
 
-    def _confirm_browser_pdf(self,row,path):
-        event=threading.Event()
-        reply=[]
-        self.queue.put(("confirm_pdf",(row,path,event,reply)))
-        while not event.wait(0.1):
-            if self.cancel.is_set() or self.closed:
-                return False
-        return reply[0] if reply else False
-
-    def _ask_pdf_provenance(self, row, path):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Αντιστοίχιση PDF από browser")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        answer = [False]
-        timer = [None]
-        def clear_timer(event):
-            if event.widget is dialog and timer[0] is not None:
-                dialog.after_cancel(timer[0])
-                timer[0] = None
-        dialog.bind("<Destroy>", clear_timer, add="+")
-        frame = ttk.Frame(dialog, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text=f"Νέο αρχείο: {path.name}\nMARK: {row['mark']}\n\n"
-                  "Επιβεβαιώστε ότι αφορά το παραπάνω παραστατικό και επιλέξτε πώς το αποθηκεύσατε.",
-                  wraplength=560).pack(anchor="w", pady=(0, 14))
-        buttons = ttk.Frame(frame)
-        buttons.pack(fill="x")
-        def choose(value):
-            answer[0] = value
-            dialog.destroy()
-        for label, value in (("Αρχικό PDF", "original"), ("PDF από εκτύπωση", "printed"), ("Άκυρο", False)):
-            ttk.Button(buttons, text=label, command=lambda choice=value: choose(choice)).pack(side="left", padx=4)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
-        def check_cancel():
-            timer[0] = None
-            if self.cancel.is_set() or self.closed:
-                choose(False)
-            else:
-                timer[0] = dialog.after(100, check_cancel)
-        timer[0] = dialog.after(100, check_cancel)
-        self.root.wait_window(dialog)
-        return answer[0]
-
     def _apply_dates(self):
         if self.busy:
             return
@@ -618,9 +578,35 @@ class App:
         client = self.clients[self.selected]
         mark = row['mark']
         self._submit(lambda: open_provider(self.db, client, mark),
-            lambda _result: self._message(f"Άνοιξε ο browser για MARK {mark}. "
-                "Ολοκληρώστε τυχόν έλεγχο στη σελίδα και κατεβάστε το PDF. "
-                "Μετά πατήστε Εισαγωγή PDF από browser με το ίδιο παραστατικό επιλεγμένο."))
+            lambda _result: self._message(f"Άνοιξε ο σύνδεσμος του παραστατικού MARK {mark} στον browser."))
+
+    def _open_saved_pdf(self):
+        if self.busy or not self.selected:
+            return
+        row = self._selected_document()
+        if row is None:
+            return
+        client = self.clients[self.selected]
+        def show(path):
+            self.pdf_preview = PDFPreview(self.root, path, f"myInvoices · ΑΦΜ {client.vat} · MARK {row['mark']}",
+                                          on_error=lambda message: self._message(message, error=True))
+        self._submit(lambda: saved_pdf_path(self.db, client, row['mark']), show)
+
+    def _open_archive_folder(self):
+        if self.busy or not self.selected:
+            return
+        client = self.clients[self.selected]
+        configured = self.download_roots.get(client.id)
+        def work():
+            root = Path(configured) if configured else desktop_directory()
+            folder = client_archive_folder(root, client)
+            open_directory(folder)
+            return str(root), folder
+        def done(result):
+            root, folder = result
+            self.download_roots[client.id] = root
+            self._message(f"Φάκελος τιμολογίων: {folder}")
+        self._submit(work, done)
 
     def _import_pdf(self):
         if self.busy or not self.selected:
@@ -641,22 +627,22 @@ class App:
             f"Ημερομηνία: {row['issue_date']} · Σειρά/αριθμός: {row['series'] or ''}/{row['number'] or ''}\n\n"
             "Το επιλεγμένο PDF αφορά αυτό το παραστατικό; Το αρχικό αρχείο θα διατηρηθεί.", parent=self.root):
             return
-        destination = filedialog.askdirectory(title="Φάκελος αρχειοθέτησης PDF", parent=self.root)
-        if not destination:
-            return
+        configured = self.download_roots.get(client.id)
         self.cancel.clear()
         def work():
             self.operation_stage = "pdf_import"
+            destination = Path(configured) if configured else desktop_directory()
             path = import_browser_pdf(self.db, client, row['mark'], source, destination, self.cancel)
-            return path, self._view(client.id)
+            return path, self._view(client.id), str(destination)
         def done(payload):
-            path, view = payload
+            path, view, destination = payload
+            self.download_roots[client.id] = destination
             self._display(view)
             self._message(f"PDF για MARK {row['mark']} αποθηκεύτηκε: {path}" if path else "Η εισαγωγή διακόπηκε.")
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 
-    def _download_pdfs(self, browser=False):
+    def _download_pdfs(self):
         if self.busy or not self.selected:
             return
         if self.demo:
@@ -668,35 +654,20 @@ class App:
             self._message(str(error), error=True)
             return
         self._reset_pages()
-        destination = self.download_roots.get(self.selected)
-        if not destination:
-            destination = filedialog.askdirectory(title="Επιλέξτε φάκελο αποθήκευσης PDF",parent=self.root)
-        if not destination:
-            return
-        self.download_roots[self.selected]=destination
-        if browser and not self.browser_download_folder:
-            initial=Path.home()/"Downloads"
-            self.browser_download_folder=filedialog.askdirectory(
-                title="Πού αποθηκεύει ο browser τα PDF; Επιλέξτε τον φάκελο Λήψεις",
-                initialdir=str(initial if initial.is_dir() else Path.home()),parent=self.root)
-            if not self.browser_download_folder:
-                return
-        if browser:
-            self._message("Θα ανοίξουν μόνο τα εκκρεμή. Αν δεν γίνεται λήψη, χρησιμοποιήστε την εκτύπωση "
-                          "του παραστατικού → Αποθήκευση ως PDF στον επιλεγμένο φάκελο λήψεων. "
-                          "Μετά επιβεβαιώστε το MARK και επιλέξτε «PDF από εκτύπωση».")
         client = self.clients[self.selected]
+        configured = self.download_roots.get(client.id)
         self.cancel.clear()
         def work():
             self.operation_stage = "pdf"
+            destination = Path(configured) if configured else desktop_directory()
             notice = lambda message: self.queue.put(("browser_notice", message))
-            downloader = (InteractivePDFDownloader(self.db,self.browser_download_folder,notice=notice,confirm=self._confirm_browser_pdf)
-                          if browser else AutomaticPDFDownloader(self.db,direct=PDFDownloader(self.db),notice=notice))
+            downloader = AutomaticPDFDownloader(self.db,direct=PDFDownloader(self.db),notice=notice)
             result = downloader.run(client, destination, self.cancel,
                 lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
-            return result, self._view(client.id)
+            return result, self._view(client.id), str(destination)
         def done(payload):
-            result, view = payload
+            result, view, destination = payload
+            self.download_roots[client.id] = destination
             self._display(view)
             label = "Η λήψη διακόπηκε" if result['cancelled'] else "Η λήψη ολοκληρώθηκε"
             reasons = " · ".join(f"{state_label(state)}: {count}" for state, count in sorted(result['reasons'].items()))
