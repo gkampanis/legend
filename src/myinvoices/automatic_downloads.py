@@ -46,6 +46,8 @@ class AutomaticPDFDownloader(PDFDownloader):
                 self.stack.enter_context(browser.session())
             except ApplicationError:
                 self.browser_unavailable = True
+                self.notice('Δεν ξεκίνησε ο browser για τις δυναμικές σελίδες. Δεν έγινε εκτύπωση σε αυτές. '
+                            'Τρέξτε INSTALL_BROWSER.bat για εγκατάσταση Chromium και δοκιμάστε ξανά.')
                 raise Pending('browser_unavailable') from None
             self.browser = browser
         return self.browser._download(client,row,root,cancel)

@@ -269,6 +269,65 @@ class PDFClassificationGUITests(unittest.TestCase):
             self.app.pdf_button.invoke();self.wait()
         paths={p.relative_to(desktop) for p in desktop.rglob('*.pdf')}
         self.assertEqual(paths,{
-            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-10/111111111/100.pdf'),
-            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-09/111111111/101.pdf')})
+            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-10/100.pdf'),
+            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-09/101.pdf')})
         self.assertEqual(self.app.bucket_totals['success'],2)
+
+    def test_reset_button_requires_confirmation_and_clears_only_download_states(self):
+        from unittest.mock import patch
+        from myinvoices.gui import App
+        add_invoices(self.db,self.client,[100,101])
+        for mark in (100,101):
+            record_attempt(self.db,self.client,mark,'printed_unverified')
+        checkpoint=self.db.checkpoint(self.client.id)
+        self.app=App(self.root,self.db,today=date(2026,11,1))
+        self.wait()
+        with patch('myinvoices.gui.messagebox.askyesno',return_value=False):
+            self.app.reset_downloads_button.invoke()
+            self.wait()
+        self.assertEqual(self.app.stat_saved.get(),'2')
+        with patch('myinvoices.gui.messagebox.askyesno',return_value=True) as confirm:
+            self.app.reset_downloads_button.invoke()
+            self.wait()
+        self.assertIn(self.client.vat,confirm.call_args.args[1])
+        self.assertEqual(self.app.bucket_totals,dict(all=2,success=0,failure=0))
+        self.assertEqual(self.db.checkpoint(self.client.id),checkpoint)
+        first=self.app.history_tree.get_children()[0]
+        self.assertEqual(self.app.history_tree.item(first,'values')[1],'Μηδενισμός λήψεων')
+
+    def test_folder_delete_dialog_shows_exact_folder_and_cancel_is_non_destructive(self):
+        import io, shutil
+        from unittest.mock import patch
+        from pypdf import PdfWriter
+        from myinvoices.gui import App
+        from myinvoices.archive_actions import trash_client_archive
+        add_invoices(self.db,self.client,[100])
+        writer=PdfWriter();writer.add_blank_page(width=100,height=100)
+        stream=io.BytesIO();writer.write(stream)
+        desktop=self.directory/'Desktop'
+        folder=desktop/'000000000_ΔΟΚΙΜΑΣΤΙΚΟ'
+        file=folder/'2026-10'/'100.pdf'
+        file.parent.mkdir(parents=True);file.write_bytes(stream.getvalue())
+        source=hashlib.sha256(self.db.invoice(self.client.id,100)['download_url'].encode()).hexdigest()
+        self.db.record_pdf(self.client.id,100,'saved_unverified',source,str(file),
+                           hashlib.sha256(stream.getvalue()).hexdigest(),len(stream.getvalue()))
+        self.app=App(self.root,self.db,today=date(2026,11,1))
+        self.wait()
+        self.app.download_roots[self.client.id]=str(desktop)
+        with patch('myinvoices.gui.messagebox.askyesno',return_value=False), \
+                patch('myinvoices.gui.trash_client_archive') as remove:
+            self.app.delete_archive_button.invoke();self.wait()
+            remove.assert_not_called()
+        self.assertTrue(file.is_file())
+        self.assertEqual(self.app.stat_saved.get(),'1')
+        recycle=self.directory/'Recycle'
+        def remove(database,client,root):
+            return trash_client_archive(database,client,root,trash=lambda path:shutil.move(path,recycle))
+        with patch('myinvoices.gui.messagebox.askyesno',return_value=True) as confirm, \
+                patch('myinvoices.gui.trash_client_archive',side_effect=remove):
+            self.app.delete_archive_button.invoke();self.wait()
+        self.assertIn(str(folder),confirm.call_args.args[1])
+        self.assertFalse(folder.exists())
+        self.assertEqual(len(list(recycle.rglob('*.pdf'))),1)
+        self.assertEqual(self.app.stat_saved.get(),'0')
+        self.assertEqual(self.db.client(self.client.id),self.client)

@@ -21,6 +21,7 @@ from .date_range import DateRange, previous_month
 from .automatic_downloads import AutomaticPDFDownloader
 from .local_files import desktop_directory, client_archive_folder, open_directory
 from .pdf_preview import PDFPreview
+from .archive_actions import removable_client_folder, trash_client_archive
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -246,6 +247,10 @@ class App:
         self.open_pdf_button.pack(side='left', padx=(0, 8))
         self.open_folder_button = ttk.Button(file_actions, text='Φάκελος τιμολογίων', command=self._open_archive_folder)
         self.open_folder_button.pack(side='left')
+        self.reset_downloads_button = ttk.Button(file_actions, text='Μηδενισμός λήψεων', command=self._reset_downloads)
+        self.reset_downloads_button.pack(side='left', padx=8)
+        self.delete_archive_button = ttk.Button(file_actions, text='Διαγραφή φακέλου πελάτη', command=self._delete_archive)
+        self.delete_archive_button.pack(side='left')
         paging = ttk.Frame(right)
         paging.pack(fill="x", pady=6)
         self.previous = ttk.Button(paging, text="Προηγούμενα", command=lambda: self._page(-1))
@@ -317,6 +322,7 @@ class App:
     def _set_busy(self, value):
         self.busy = value
         for widget in (self.sync_button,self.pdf_button,self.browser_pdf_button,self.open_pdf_button,self.open_folder_button,
+                       self.reset_downloads_button,self.delete_archive_button,
                        self.from_entry,self.to_entry,self.search_entry,self.previous,self.next):
             widget.configure(state="disabled" if value else "normal")
         for index in (0,1):
@@ -463,7 +469,8 @@ class App:
         self.visible_documents = self.visible_by_bucket[self.document_bucket]
         self.history_tree.delete(*self.history_tree.get_children())
         for row in events:
-            self.history_tree.insert("", "end", values=(row["at"], "Άντληση περιόδου" if row["kind"] == "period_page_committed" else "Αποθήκευση σελίδας", row["record_count"]))
+            kind={'period_page_committed':'Άντληση περιόδου','pdf_downloads_reset':'Μηδενισμός λήψεων'}.get(row['kind'],'Αποθήκευση σελίδας')
+            self.history_tree.insert("", "end", values=(row["at"], kind, row["record_count"]))
         self.changes_tree.delete(*self.changes_tree.get_children())
         for row in changes:
             self.changes_tree.insert("", "end", values=(CHANGE_LABELS[row["kind"]],
@@ -641,6 +648,60 @@ class App:
             self._message(f"PDF για MARK {row['mark']} αποθηκεύτηκε: {path}" if path else "Η εισαγωγή διακόπηκε.")
         self._submit(work, done)
         self.stop_button.configure(state="normal")
+
+    def _reset_downloads(self):
+        if self.busy or not self.selected:
+            return
+        client=self.clients[self.selected]
+        if not messagebox.askyesno('Μηδενισμός λήψεων',
+                f'Πελάτης: {client.name} · ΑΦΜ {client.vat}\n\n'
+                'Θα μηδενιστούν οι καταστάσεις λήψης PDF για όλες τις ημερομηνίες αυτού του πελάτη. '
+                'Τα υπάρχοντα PDF, τα παραστατικά ΑΑΔΕ και τα credentials διατηρούνται.\n\n'
+                'Η νέα λήψη θα ξαναδοκιμάσει και τα ήδη αποθηκευμένα. Αν υπάρχει ίδιο όνομα αρχείου, '
+                'θα δημιουργηθεί νέο αρχείο χωρίς αντικατάσταση.\n\nΣυνέχεια;',
+                parent=self.root,default='no',icon='warning'):
+            return
+        self._reset_pages()
+        def work():
+            count=self.db.reset_downloads(client.id)
+            return count,self._view(client.id)
+        def done(payload):
+            count,view=payload
+            self._display(view)
+            self._message(f'Μηδενίστηκαν οι λήψεις για {count} παραστατικά του ΑΦΜ {client.vat}. '
+                          'Πατήστε Λήψη PDF για νέα λήψη στην επιλεγμένη περίοδο.')
+        self._submit(work,done)
+
+    def _delete_archive(self):
+        if self.busy or not self.selected:
+            return
+        client=self.clients[self.selected]
+        configured=self.download_roots.get(client.id)
+        def prepare():
+            root=Path(configured) if configured else desktop_directory()
+            folder=removable_client_folder(root,client)
+            return root,folder,folder.exists()
+        def review(payload):
+            root,folder,exists=payload
+            operation=('Ολόκληρος ο παρακάτω φάκελος θα μεταφερθεί στον Κάδο ανακύκλωσης.' if exists else
+                       'Ο παρακάτω φάκελος δεν υπάρχει. Θα μηδενιστούν οι λήψεις αυτού του πελάτη.')
+            if not messagebox.askyesno('Διαγραφή φακέλου πελάτη',
+                    f'Πελάτης: {client.name} · ΑΦΜ {client.vat}\n\n{folder}\n\n{operation}\n\n'
+                    'Μηδενίζονται επίσης όλες οι καταστάσεις λήψης του πελάτη, για νέα λήψη από την αρχή. '
+                    'Η εγγραφή πελάτη, τα credentials και τα παραστατικά ΑΑΔΕ διατηρούνται.\n\nΣυνέχεια;',
+                    parent=self.root,default='no',icon='warning'):
+                return
+            self._reset_pages()
+            def work():
+                result=trash_client_archive(self.db,client,root)
+                return result,self._view(client.id)
+            def done(result):
+                (path,moved,count),view=result
+                self._display(view)
+                self._message((f'Ο φάκελος μεταφέρθηκε στον Κάδο: {path}.' if moved else 'Ο φάκελος δεν υπήρχε.')+
+                              f' Μηδενίστηκαν οι λήψεις για {count} παραστατικά του πελάτη.')
+            self._submit(work,done)
+        self._submit(prepare,review)
 
     def _download_pdfs(self):
         if self.busy or not self.selected:

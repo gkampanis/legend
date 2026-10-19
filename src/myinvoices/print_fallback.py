@@ -23,7 +23,9 @@ _SNAPSHOT = """() => {
  const text = document.body?.innerText || '';
  return {
    text: text.slice(0,250001), title: document.title, type: document.contentType,
-   viewer: any('iframe,embed,object,canvas,.pdfViewer,[data-pdfjsprinting]') ||
+   viewer: any('iframe,embed,object,.pdfViewer,[data-pdfjsprinting]') ||
+     [...document.querySelectorAll('canvas')].some(e => visible(e) &&
+       e.getBoundingClientRect().width >= 400 && e.getBoundingClientRect().height >= 300) ||
      !!window.PDFViewerApplication,
    challenge: any('iframe[src*="challenges.cloudflare.com"],.cf-turnstile,[id^="cf-chl-"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"]'),
    login: any('input[type="password"]'),

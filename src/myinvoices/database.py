@@ -312,11 +312,14 @@ class Database:
                 AND p.source_hash=source_digest(i.download_url) AND p.state IN ({states})
                 AND p.id>COALESCE((SELECT max(t.id) FROM pdf_attempts t
                     WHERE t.client_id=i.client_id AND t.mark=i.mark AND t.source_hash=p.source_hash
-                    AND t.state IN ('artifact_missing','artifact_changed')),0)
+                    AND t.state IN ('artifact_missing','artifact_changed','downloads_reset')),0)
                 ORDER BY p.id DESC LIMIT 1)
             LEFT JOIN pdf_attempts attempt ON attempt.id=(
                 SELECT p.id FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark
-                AND p.source_hash=source_digest(i.download_url) ORDER BY p.id DESC LIMIT 1)
+                AND p.source_hash=source_digest(i.download_url) AND p.state<>'downloads_reset'
+                AND p.id>COALESCE((SELECT max(t.id) FROM pdf_attempts t
+                    WHERE t.client_id=p.client_id AND t.mark=p.mark AND t.source_hash=p.source_hash
+                    AND t.state='downloads_reset'),0) ORDER BY p.id DESC LIMIT 1)
             WHERE i.client_id=?""" + clause
         return query, (*SAVED_STATES, client_id, *values)
 
@@ -373,7 +376,7 @@ class Database:
                 AND source_hash=? AND state IN ({states})
                 AND id>COALESCE((SELECT max(t.id) FROM pdf_attempts t
                     WHERE t.client_id=p.client_id AND t.mark=p.mark AND t.source_hash=p.source_hash
-                    AND t.state IN ('artifact_missing','artifact_changed')),0)
+                    AND t.state IN ('artifact_missing','artifact_changed','downloads_reset')),0)
                 ORDER BY id DESC LIMIT 1""", (client_id, mark, source_hash, *SAVED_STATES)).fetchone()
             return dict(row) if row else None
 
@@ -381,6 +384,28 @@ class Database:
         with self.connection() as conn:
             conn.execute("""INSERT INTO pdf_attempts(client_id,mark,state,source_hash,path,sha256,byte_count,at)
                 VALUES (?,?,?,?,?,?,?,?)""", (client_id,mark,state,source_hash,path,sha256,byte_count,now()))
+
+    def reset_downloads(self, client_id):
+        """Append reset barriers for all this client's sources in one transaction.
+
+        Invoice/API checkpoints, client/credentials and attempt history survive.
+        Old successes/challenges cannot reappear if a source URL changes back.
+        """
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT 1 FROM clients WHERE id=?',(client_id,)).fetchone() is None:
+                raise ApplicationError('Επιλέξτε πελάτη για μηδενισμό λήψεων.')
+            rows=conn.execute('''SELECT mark,source_digest(download_url) AS source_hash
+                FROM invoices WHERE client_id=? UNION SELECT mark,source_hash FROM pdf_attempts
+                WHERE client_id=?''',(client_id,client_id)).fetchall()
+            at=now()
+            conn.executemany('''INSERT INTO pdf_attempts(client_id,mark,state,source_hash,at)
+                VALUES (?,?,'downloads_reset',?,?)''',[(client_id,r['mark'],r['source_hash'],at) for r in rows])
+            count=conn.execute('SELECT count(*) FROM invoices WHERE client_id=?',(client_id,)).fetchone()[0]
+            conn.execute('INSERT INTO events(client_id,at,kind,record_count) VALUES (?,?,?,?)',
+                         (client_id,at,'pdf_downloads_reset',count))
+            conn.commit()
+        return count
 
     def invoice(self, client_id, mark):
         with self.connection() as conn:

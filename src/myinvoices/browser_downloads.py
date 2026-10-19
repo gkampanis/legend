@@ -4,6 +4,7 @@ from contextlib import suppress, contextmanager
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import time
 from urllib.parse import urlsplit, unquote, urldefrag
@@ -38,8 +39,31 @@ VIEWER_SNAPSHOT = """async ({limit}) => {
    for (let i=0; i<bytes.length; i+=32768) binary += String.fromCharCode(...bytes.subarray(i,i+32768));
    return {encoded:'data:application/pdf;base64,'+btoa(binary),sources};
  }
- return {sources,viewer:!!document.querySelector('canvas,.pdfViewer,embed,object,iframe')};
+ const viewer = [...document.querySelectorAll('iframe,embed,object,.pdfViewer')].some(visible) ||
+   [...document.querySelectorAll('canvas')].some(e=>visible(e) &&
+     e.getBoundingClientRect().width >= 400 && e.getBoundingClientRect().height >= 300);
+ return {sources,viewer};
 }"""
+
+
+def browser_launch_choices():
+    if sys.platform != 'win32':
+        chromium=shutil.which('chromium')
+        return ([{'executable_path':chromium}] if chromium else []) + [{}]
+    choices=[{'channel':'msedge'},{'channel':'chrome'}]
+    seen=set()
+    for variable in ('PROGRAMFILES','PROGRAMFILES(X86)','LOCALAPPDATA'):
+        root=os.environ.get(variable)
+        if not root:
+            continue
+        for relative in ('BraveSoftware/Brave-Browser/Application/brave.exe',
+                         'Microsoft/Edge/Application/msedge.exe','Google/Chrome/Application/chrome.exe'):
+            executable=Path(root)/relative
+            if executable.is_file() and str(executable) not in seen:
+                seen.add(str(executable))
+                choices.append({'executable_path':str(executable)})
+    choices.append({})  # Playwright's installed Chromium is the final fallback.
+    return choices
 
 
 class BrowserPDFDownloader(PDFDownloader):
@@ -62,13 +86,16 @@ class BrowserPDFDownloader(PDFDownloader):
     def session(self):
         """Share a temporary browser across one batch, including lazy fallback calls."""
         try:
-            import playwright.async_api  # noqa: F401
+            from playwright.async_api import Error
         except ImportError:
             raise ApplicationError('Τρέξτε πρώτα INSTALL_BROWSER.bat για τη λήψη μέσω Edge/Chrome.') from None
         with asyncio.Runner() as runner:
             self.runner = runner
             try:
-                runner.run(self._start())
+                try:
+                    runner.run(self._start())
+                except Error:
+                    raise ApplicationError('Δεν ξεκίνησε η συνεδρία browser. Τρέξτε INSTALL_BROWSER.bat και δοκιμάστε ξανά.') from None
                 yield self
             finally:
                 runner.run(self._close())
@@ -85,16 +112,14 @@ class BrowserPDFDownloader(PDFDownloader):
                 if parsed.username:
                     options['proxy']['username'] = unquote(parsed.username)
                     options['proxy']['password'] = unquote(parsed.password or '')
-        choices = [{'channel':'msedge'}, {'channel':'chrome'}, {}] if os.name == 'nt' else [
-            {'executable_path':shutil.which('chromium')}] if shutil.which('chromium') else [{}]
-        for choice in choices:
+        for choice in browser_launch_choices():
             try:
                 self.browser = await self.playwright.chromium.launch(**options, **choice)
                 break
             except Error:
                 continue
         if self.browser is None:
-            raise ApplicationError('Δεν ξεκίνησε Edge/Chrome. Εγκαταστήστε Edge ή δείτε τις οδηγίες browser στο README.')
+            raise ApplicationError('Δεν ξεκίνησε Edge/Chrome/Brave ή Chromium. Τρέξτε INSTALL_BROWSER.bat και δοκιμάστε ξανά.')
         self.context = await self._new_context()
 
     async def _new_context(self):

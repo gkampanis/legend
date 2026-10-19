@@ -1,2 +1,4 @@
 pypdf==6.10.0
 pypdfium2==5.13.0
+Send2Trash==2.1.0
+pywin32==312; sys_platform == "win32"

@@ -46,7 +46,7 @@ LABELS = {
     'print_failed': 'Αποτυχία δημιουργίας PDF εκτύπωσης',
     'browser_confirmation': 'Εκκρεμεί: δεν επιβεβαιώθηκε νέο PDF από τον browser',
     'challenge': 'Εκκρεμεί για δεύτερο πέρασμα: Cloudflare / CAPTCHA',
-    'browser_unavailable': 'Εκκρεμεί: χρειάζεται εγκατάσταση/έλεγχος browser (INSTALL_BROWSER.bat)',
+    'browser_unavailable': 'Δεν ξεκίνησε browser για λήψη/εκτύπωση — τρέξτε INSTALL_BROWSER.bat',
     'browser_required': 'Εκκρεμεί: χρειάζεται φόρτωση στον browser',
     'browser_timeout': 'Εκκρεμεί: ο browser δεν παρέδωσε PDF εγκαίρως',
     'browser_download_failed': 'Εκκρεμεί: απέτυχε το download στον browser',
@@ -90,12 +90,11 @@ def open_provider(database, client, mark, browser=None):
 
 
 def archive_folder(root, client, row):
-    supplier = ''.join(c for c in (row['issuer_vat'] or '') if c.isascii() and c.isalnum())[:32] or 'Αγνωστος'
     try:
         month = date.fromisoformat(str(row['issue_date'])).strftime('%Y-%m')
     except (KeyError, ValueError, TypeError):
         raise Pending('archive_date_invalid') from None
-    folder = client_archive_folder(root, client) / month / supplier
+    folder = client_archive_folder(root, client) / month
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 

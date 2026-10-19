@@ -16,19 +16,19 @@ class LocalArchiveTests(unittest.TestCase):
     def setUp(self):
         helpers.PDFTests.setUp(self)
 
-    def test_months_use_invoice_date_and_preserve_supplier_client_isolation(self):
+    def test_months_use_registered_client_vat_without_supplier_subfolders(self):
         with self.db.connection() as conn:
             conn.execute("UPDATE invoices SET issue_date='2025-12-31' WHERE mark=101")
             conn.execute("UPDATE invoices SET issue_date='2026-01-01' WHERE mark=102")
         PDFDownloader(self.db,helpers.Opener(self.pdf)).run(self.client,self.root/'Desktop',threading.Event())
         paths={p.relative_to(self.root/'Desktop') for p in (self.root/'Desktop').rglob('*.pdf')}
         self.assertEqual(paths,{
-            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2025-12/111111111/101.pdf'),
-            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-01/111111111/102.pdf')})
+            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2025-12/101.pdf'),
+            Path('000000000_ΔΟΚΙΜΑΣΤΙΚΟ/2026-01/102.pdf')})
         production=SimpleNamespace(vat='123456789',environment='production')
         row=dict(issuer_vat='987654321',issue_date='2026-02-28')
         folder=archive_folder(self.root/'Desktop',production,row)
-        self.assertEqual(folder,self.root/'Desktop/123456789/2026-02/987654321')
+        self.assertEqual(folder,self.root/'Desktop/123456789/2026-02')
         for invalid in ('2026-02-30','../../other',''):
             with self.assertRaises(Pending):
                 archive_folder(self.root/'Desktop',production,dict(row,issue_date=invalid))

@@ -105,10 +105,27 @@ class PrintFallbackTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_pending(self.invoice_html() + '<div class="cf-turnstile">Verify you are human</div>', 'challenge')
 
     async def test_visible_viewers_are_not_printed_as_outer_pages(self):
-        for viewer in ('<iframe src="about:blank"></iframe>', '<canvas></canvas>',
+        for viewer in ('<iframe src="about:blank"></iframe>', '<canvas width="900" height="1200"></canvas>',
                        '<object data="about:blank"></object>', '<embed src="about:blank">',
                        '<div class="pdfViewer">Rendered document</div>'):
             await self.assert_pending(self.invoice_html() + viewer, 'print_viewer_unsupported')
+
+    async def test_html_invoice_with_small_barcode_canvas_is_printable(self):
+        html=self.invoice_html()+'<canvas id="barcode" width="200" height="80"></canvas>'
+        await self.navigate(html)
+        result=await self.capture()
+        self.assertEqual(result.state,'printed_unverified')
+        self.assertEqual(len(PdfReader(result.path).pages),2)
+
+    async def test_print_button_page_uses_native_beforeprint_layout(self):
+        html=self.invoice_html()+'''<button onclick="window.print()">Εκτύπωση</button>
+          <p id="prepared"></p><script>window.addEventListener('beforeprint',()=>{
+            document.getElementById('prepared').textContent='PRINT PREPARATION COMPLETE';
+          });</script>'''
+        await self.navigate(html)
+        result=await self.capture()
+        text='\n'.join(page.extract_text() for page in PdfReader(result.path).pages)
+        self.assertIn('PRINT PREPARATION COMPLETE',text)
 
     async def test_print_css_hiding_the_invoice_is_not_success(self):
         html = self.invoice_html().replace('</style>', '@media print {body {display:none}}</style>')

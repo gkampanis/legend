@@ -59,9 +59,17 @@ class BrowserDownloadTests(unittest.TestCase):
         self.assertFalse(list(self.root.rglob('*.part')))
 
     def test_canvas_viewer_network_pdf_is_captured(self):
-        html='<html><body><canvas></canvas><script>fetch("/invoice.pdf").then(r=>r.arrayBuffer())</script></body></html>'
+        html='<html><body><canvas width="800" height="1000"></canvas><script>fetch("/invoice.pdf").then(r=>r.arrayBuffer())</script></body></html>'
         result=self.downloader(html,{'/invoice.pdf':(self.pdf,'application/pdf')}).run(self.client,self.root/'archive',threading.Event())
         self.assertEqual(result['saved'],2)
+
+    def test_small_barcode_canvas_does_not_claim_an_unrelated_network_pdf(self):
+        html='<html><body><canvas width="200" height="80"></canvas><script>fetch("/other.pdf")</script></body></html>'
+        result=self.downloader(html,{'/other.pdf':(self.pdf,'application/pdf')},timeout=1).run(
+            self.client,self.root/'archive',threading.Event())
+        self.assertEqual(result['saved'],0)
+        self.assertEqual(dict(result['reasons']),{'browser_timeout':2})
+        self.assertFalse(list(self.root.rglob('*.pdf')))
 
     def test_multiple_pdfs_are_not_selected_arbitrarily(self):
         html='''<html><body><iframe src="/one.pdf"></iframe><iframe src="/two.pdf"></iframe></body></html>'''
