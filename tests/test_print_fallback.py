@@ -104,6 +104,19 @@ class PrintFallbackTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_pending(html, 'challenge')
         await self.assert_pending(self.invoice_html() + '<div class="cf-turnstile">Verify you are human</div>', 'challenge')
 
+    async def test_completed_widget_does_not_block_an_already_loaded_invoice(self):
+        html=self.invoice_html()+'''<div class="cf-turnstile">Completed synthetic widget</div>
+            <input type="hidden" name="cf-turnstile-response" value="synthetic-completed-response">'''
+        await self.navigate(html)
+        result=await self.capture()
+        self.assertEqual(result.state,'printed_unverified')
+
+    async def test_unfinished_other_widget_and_modal_still_block_printing(self):
+        html=self.invoice_html()+'''<div class="cf-turnstile">Pending synthetic widget</div>
+            <textarea name="g-recaptcha-response" hidden>synthetic-completed-response</textarea>'''
+        await self.assert_pending(html,'challenge')
+        await self.assert_pending(self.invoice_html()+'<div aria-modal="true">Please finish this dialog</div>','print_not_invoice')
+
     async def test_visible_viewers_are_not_printed_as_outer_pages(self):
         for viewer in ('<iframe src="about:blank"></iframe>', '<canvas width="900" height="1200"></canvas>',
                        '<object data="about:blank"></object>', '<embed src="about:blank">',

@@ -22,6 +22,7 @@ from .automatic_downloads import AutomaticPDFDownloader
 from .local_files import desktop_directory, client_archive_folder, open_directory
 from .pdf_preview import PDFPreview
 from .archive_actions import removable_client_folder, trash_client_archive
+from .browser_recovery import RecoveryPDFDownloader
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -212,10 +213,20 @@ class App:
             vertical = ttk.Scrollbar(documents, orient="vertical", command=tree.yview)
             horizontal = ttk.Scrollbar(documents, orient="horizontal", command=tree.xview)
             tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-            tree.grid(row=0, column=0, sticky="nsew")
-            vertical.grid(row=0, column=1, sticky="ns")
-            horizontal.grid(row=1, column=0, sticky="ew")
-            documents.rowconfigure(0, weight=1)
+            tree_row=0
+            if bucket=='failure':
+                tree_row=1
+                recovery_tools=ttk.Frame(documents,padding=6)
+                recovery_tools.grid(row=0,column=0,columnspan=2,sticky='ew')
+                self.recovery_button=ttk.Button(recovery_tools,text='Ανάκτηση αποτυχημένων',
+                                                command=lambda:self._download_pdfs(recovery=True))
+                self.recovery_button.pack(side='left',padx=(0,10))
+                ttk.Label(recovery_tools,text='Ανάκτηση επιλεγμένων σε ορατό browser · χωρίς επιλογή, όλα τα αποτυχημένα της περιόδου.',
+                          wraplength=600).pack(side='left')
+            tree.grid(row=tree_row, column=0, sticky="nsew")
+            vertical.grid(row=tree_row, column=1, sticky="ns")
+            horizontal.grid(row=tree_row+1, column=0, sticky="ew")
+            documents.rowconfigure(tree_row, weight=1)
             documents.columnconfigure(0, weight=1)
             self.document_trees[bucket] = tree
             tree.bind('<Double-1>', lambda _event: self._open_saved_pdf())
@@ -322,7 +333,7 @@ class App:
     def _set_busy(self, value):
         self.busy = value
         for widget in (self.sync_button,self.pdf_button,self.browser_pdf_button,self.open_pdf_button,self.open_folder_button,
-                       self.reset_downloads_button,self.delete_archive_button,
+                       self.reset_downloads_button,self.delete_archive_button,self.recovery_button,
                        self.from_entry,self.to_entry,self.search_entry,self.previous,self.next):
             widget.configure(state="disabled" if value else "normal")
         for index in (0,1):
@@ -703,7 +714,7 @@ class App:
             self._submit(work,done)
         self._submit(prepare,review)
 
-    def _download_pdfs(self):
+    def _download_pdfs(self,recovery=False):
         if self.busy or not self.selected:
             return
         if self.demo:
@@ -717,12 +728,14 @@ class App:
         self._reset_pages()
         client = self.clients[self.selected]
         configured = self.download_roots.get(client.id)
+        recovery_marks=(tuple(self.failure_tree.selection()) or None) if recovery else None
         self.cancel.clear()
         def work():
             self.operation_stage = "pdf"
             destination = Path(configured) if configured else desktop_directory()
             notice = lambda message: self.queue.put(("browser_notice", message))
-            downloader = AutomaticPDFDownloader(self.db,direct=PDFDownloader(self.db),notice=notice)
+            downloader = (RecoveryPDFDownloader(self.db,notice=notice,marks=recovery_marks) if recovery else
+                          AutomaticPDFDownloader(self.db,direct=PDFDownloader(self.db),notice=notice))
             result = downloader.run(client, destination, self.cancel,
                 lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
             return result, self._view(client.id), str(destination)
@@ -731,6 +744,8 @@ class App:
             self.download_roots[client.id] = destination
             self._display(view)
             label = "Η λήψη διακόπηκε" if result['cancelled'] else "Η λήψη ολοκληρώθηκε"
+            if recovery:
+                label='Η ανάκτηση διακόπηκε' if result['cancelled'] else 'Η ανάκτηση ολοκληρώθηκε'
             reasons = " · ".join(f"{state_label(state)}: {count}" for state, count in sorted(result['reasons'].items()))
             message = (f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
                        f"Εκκρεμή σε αυτή την εργασία: {result['pending']}. Φάκελος: {destination}.")

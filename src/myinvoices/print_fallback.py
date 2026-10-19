@@ -21,14 +21,19 @@ _SNAPSHOT = """() => {
    getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
  const any = selector => [...document.querySelectorAll(selector)].some(visible);
  const text = document.body?.innerText || '';
+ const completed = selector => [...document.querySelectorAll(selector)]
+   .some(e=>typeof e.value==='string' && e.value.trim().length>0);
  return {
    text: text.slice(0,250001), title: document.title, type: document.contentType,
    viewer: any('iframe,embed,object,.pdfViewer,[data-pdfjsprinting]') ||
      [...document.querySelectorAll('canvas')].some(e => visible(e) &&
        e.getBoundingClientRect().width >= 400 && e.getBoundingClientRect().height >= 300) ||
      !!window.PDFViewerApplication,
-   challenge: any('iframe[src*="challenges.cloudflare.com"],.cf-turnstile,[id^="cf-chl-"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"]'),
+   challenge: any('iframe[src*="challenges.cloudflare.com"],.cf-turnstile,[id^="cf-chl-"]') && !completed('input[name="cf-turnstile-response"]') ||
+     any('iframe[src*="recaptcha"]') && !completed('textarea[name="g-recaptcha-response"]') ||
+     any('iframe[src*="hcaptcha"]') && !completed('textarea[name="h-captcha-response"],input[name="h-captcha-response"]'),
    login: any('input[type="password"]'),
+   blocked: any('[aria-modal="true"],dialog[open],.modal.show'),
    ready: (!document.fonts || document.fonts.status === 'loaded') &&
      [...document.images].filter(visible).every(i => i.complete && i.naturalWidth > 0),
    shape: [document.body?.scrollWidth || 0,document.body?.scrollHeight || 0],
@@ -120,7 +125,7 @@ def _guard(snapshot, client, invoice):
     if snapshot.get('viewer') or snapshot.get('type') == 'application/pdf':
         raise Pending('print_viewer_unsupported')
     error = r'\b(access denied|forbidden|not found|service unavailable|error|σφαλμα|δεν βρεθηκε|συνδεση χρηστη)\b'
-    if (snapshot.get('login') or snapshot.get('complex') or len(text) > 250000 or
+    if (snapshot.get('login') or snapshot.get('blocked') or snapshot.get('complex') or len(text) > 250000 or
             re.search(error, title) or re.match(r'^\s*(?:error|access denied|forbidden|404\b)', text)):
         raise Pending('print_not_invoice')
     if not _matches_invoice(text, client, invoice):

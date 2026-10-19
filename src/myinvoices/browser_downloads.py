@@ -66,6 +66,19 @@ def browser_launch_choices():
     return choices
 
 
+def browser_launch_options(headless):
+    options=dict(headless=headless)
+    proxy=getproxies().get('https')
+    if proxy:
+        parsed=urlsplit(proxy)
+        if parsed.hostname:
+            options['proxy']={'server':f'{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}'}
+            if parsed.username:
+                options['proxy']['username']=unquote(parsed.username)
+                options['proxy']['password']=unquote(parsed.password or '')
+    return options
+
+
 class BrowserPDFDownloader(PDFDownloader):
     def __init__(self, database, *, timeout=90, headless=False, notice=lambda message: None, allow_print=False):
         super().__init__(database)
@@ -103,15 +116,7 @@ class BrowserPDFDownloader(PDFDownloader):
     async def _start(self):
         from playwright.async_api import async_playwright, Error
         self.playwright = await async_playwright().start()
-        options = dict(headless=self.headless)
-        proxy = getproxies().get('https')
-        if proxy:
-            parsed = urlsplit(proxy)
-            if parsed.hostname:
-                options['proxy'] = {'server': f'{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}'}
-                if parsed.username:
-                    options['proxy']['username'] = unquote(parsed.username)
-                    options['proxy']['password'] = unquote(parsed.password or '')
+        options = browser_launch_options(self.headless)
         for choice in browser_launch_choices():
             try:
                 self.browser = await self.playwright.chromium.launch(**options, **choice)

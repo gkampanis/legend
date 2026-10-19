@@ -331,3 +331,35 @@ class PDFClassificationGUITests(unittest.TestCase):
         self.assertEqual(len(list(recycle.rglob('*.pdf'))),1)
         self.assertEqual(self.app.stat_saved.get(),'0')
         self.assertEqual(self.db.client(self.client.id),self.client)
+
+    def test_recovery_button_processes_failed_rows_without_reset_or_manual_browser(self):
+        import io
+        from unittest.mock import patch
+        from pypdf import PdfWriter
+        from myinvoices.gui import App
+        from myinvoices.pdf_downloads import PDFDownloader,PDFArtifact,archive_pdf_bytes
+        add_invoices(self.db,self.client,[100,101,102])
+        record_attempt(self.db,self.client,100,'saved_unverified')
+        record_attempt(self.db,self.client,101,'challenge')
+        writer=PdfWriter();writer.add_blank_page(width=100,height=100)
+        data=io.BytesIO();writer.write(data)
+        recovered=[]
+        class SyntheticRecovery(PDFDownloader):
+            def _candidates(inner,client_id,dates=None):
+                return inner.db.failed_download_candidates(client_id,dates)
+            def _download(inner,client,row,root,cancel):
+                recovered.append(row['mark'])
+                return PDFArtifact(*archive_pdf_bytes(data.getvalue(),client,row,root,cancel),'printed_unverified')
+        self.app=App(self.root,self.db,today=date(2026,11,1))
+        self.wait()
+        self.select_bucket('failure')
+        self.app.download_roots[self.client.id]=str(self.directory/'Desktop')
+        with patch('myinvoices.gui.RecoveryPDFDownloader',side_effect=lambda db,**kwargs:SyntheticRecovery(db)), \
+                patch('myinvoices.gui.open_provider',side_effect=AssertionError('Recovery must capture documents')), \
+                patch.object(self.db,'reset_downloads',side_effect=AssertionError('No reset during recovery')):
+            self.app.recovery_button.invoke();self.wait()
+        self.assertEqual(recovered,[101])
+        self.assertEqual(self.app.bucket_totals,dict(all=3,success=2,failure=0))
+        self.assertEqual(self.app.success_tree.set('101','method'),'Εκτύπωση σε PDF')
+        self.assertEqual(len(list((self.directory/'Desktop').rglob('*.pdf'))),1)
+        self.assertIn('Η ανάκτηση ολοκληρώθηκε',self.app.message_text.get('1.0','end'))

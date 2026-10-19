@@ -33,9 +33,13 @@ class PDFArtifact(NamedTuple):
 
 
 INTERACTIVE_STATES = {'challenge','http_403','browser_required','browser_timeout','browser_closed',
-    'browser_download_failed','browser_confirmation','html_page','descriptor_limit','invalid_descriptor','ambiguous_document','browser_unavailable','print_not_invoice','print_viewer_unsupported','print_timeout','print_failed'}
+    'browser_download_failed','browser_confirmation','html_page','descriptor_limit','invalid_descriptor','ambiguous_document','browser_unavailable','print_not_invoice','print_viewer_unsupported','print_timeout','print_failed',
+    'recovery_timeout','recovery_challenge','recovery_pdf_mismatch'}
 
 LABELS = {
+    'recovery_timeout': 'Δεν ολοκληρώθηκε η ανάκτηση μέσα στον χρόνο αναμονής',
+    'recovery_challenge': 'Εκκρεμεί έλεγχος πρόσβασης στον ορατό browser',
+    'recovery_pdf_mismatch': 'Δεν αντιστοιχίστηκε το PDF του νέου παραθύρου στο παραστατικό',
     'archive_date_invalid': 'Δεν αποθηκεύτηκε PDF: μη έγκυρη ημερομηνία έκδοσης',
     'printed_unverified': 'PDF από εκτύπωση',
     'artifact_missing': 'Το αποθηκευμένο αρχείο δεν βρέθηκε',

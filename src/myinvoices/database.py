@@ -368,6 +368,13 @@ class Database:
             return [dict(r) for r in conn.execute("""SELECT mark,issue_date,issuer_vat,download_url,
                 pdf_state,pdf_source_hash FROM (""" + query + ") WHERE download_url IS NOT NULL AND cancelled=0 ORDER BY mark", values)]
 
+    def failed_download_candidates(self, client_id, dates=None):
+        query,values=self._invoice_scope(client_id,dates)
+        with self.connection() as conn:
+            return [dict(r) for r in conn.execute('''SELECT mark,issue_date,issuer_vat,download_url,
+                pdf_state,pdf_source_hash FROM ('''+query+''') WHERE pdf_attempted=1 AND pdf_saved=0
+                AND cancelled=0 AND download_url IS NOT NULL ORDER BY mark''',values)]
+
     def saved_pdf(self, client_id, mark, source_hash):
         from .pdf_downloads import SAVED_STATES
         states = ",".join("?" for _ in SAVED_STATES)
