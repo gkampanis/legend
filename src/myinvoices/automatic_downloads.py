@@ -13,7 +13,7 @@ class AutomaticPDFDownloader(PDFDownloader):
         super().__init__(database)
         self.direct = direct or PDFDownloader(database)
         self.notice = notice
-        self.browser_factory = browser_factory or (lambda: BrowserPDFDownloader(database,notice=notice,headless=True,timeout=15))
+        self.browser_factory = browser_factory or (lambda: BrowserPDFDownloader(database,notice=notice,headless=True,timeout=15,allow_print=True))
         self.browser = None
         self.browser_unavailable = False
 

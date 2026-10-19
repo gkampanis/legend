@@ -14,15 +14,33 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 import uuid
+from typing import NamedTuple
 
 from .models import ApplicationError
 from .provider_documents import MAX_DESCRIPTOR_BYTES, ResolutionError, resolve_document
 
 MAX_BYTES = 40 * 1024 * 1024
+SAVED_STATES = ('saved_unverified','imported_unverified','printed_unverified')
+
+
+class PDFArtifact(NamedTuple):
+    path: Path
+    checksum: str
+    size: int
+    state: str = 'saved_unverified'
+
+
 INTERACTIVE_STATES = {'challenge','http_403','browser_required','browser_timeout','browser_closed',
-    'browser_download_failed','browser_confirmation','html_page','descriptor_limit','invalid_descriptor','ambiguous_document','browser_unavailable'}
+    'browser_download_failed','browser_confirmation','html_page','descriptor_limit','invalid_descriptor','ambiguous_document','browser_unavailable','print_not_invoice','print_viewer_unsupported','print_timeout','print_failed'}
 
 LABELS = {
+    'printed_unverified': 'PDF από εκτύπωση',
+    'artifact_missing': 'Το αποθηκευμένο αρχείο δεν βρέθηκε',
+    'artifact_changed': 'Το αποθηκευμένο αρχείο έχει αλλάξει',
+    'print_not_invoice': 'Αποτυχία εκτύπωσης: δεν αναγνωρίστηκε φορτωμένο παραστατικό',
+    'print_viewer_unsupported': 'Αποτυχία εκτύπωσης: ο προβολέας χρειάζεται χειροκίνητη εκτύπωση',
+    'print_timeout': 'Αποτυχία εκτύπωσης: δεν ολοκληρώθηκε η φόρτωση',
+    'print_failed': 'Αποτυχία δημιουργίας PDF εκτύπωσης',
     'browser_confirmation': 'Εκκρεμεί: δεν επιβεβαιώθηκε νέο PDF από τον browser',
     'challenge': 'Εκκρεμεί για δεύτερο πέρασμα: Cloudflare / CAPTCHA',
     'browser_unavailable': 'Εκκρεμεί: χρειάζεται εγκατάσταση/έλεγχος browser (INSTALL_BROWSER.bat)',
@@ -208,7 +226,7 @@ class PDFDownloader:
 
     def run(self, client, destination, cancel, progress=lambda done, total: None, dates=None):
         rows = self._candidates(client.id, dates)
-        result = dict(saved=0, skipped=0, pending=0, cancelled=False, reasons=Counter())
+        result = dict(saved=0, printed=0, skipped=0, pending=0, cancelled=False, reasons=Counter())
         for index, row in enumerate(rows):
             if cancel.is_set():
                 result['cancelled'] = True
@@ -217,23 +235,31 @@ class PDFDownloader:
             old = self.db.saved_pdf(client.id, row['mark'], source_hash)
             if old:
                 path = Path(old['path'])
+                invalidation = 'artifact_changed'
                 try:
                     if not path.is_symlink() and path.stat().st_size == old['byte_count'] and digest_file(path) == old['sha256']:
                         result['skipped'] += 1
                         progress(index + 1, len(rows))
                         continue
+                except FileNotFoundError:
+                    invalidation = 'artifact_missing'
                 except OSError:
-                    pass
+                    invalidation = 'artifact_missing'
+                self.db.record_pdf(client.id,row['mark'],invalidation,source_hash)
             output = None
             try:
                 output = self._download(client, row, Path(destination), cancel)
                 if output is None:
                     result['cancelled'] = True
                     break
-                path, checksum, size = output
-                self.db.record_pdf(client.id, row['mark'], 'saved_unverified', source_hash,
+                path, checksum, size = output[:3]
+                state = getattr(output,'state','saved_unverified')
+                if state not in SAVED_STATES:
+                    raise ApplicationError('Μη αναμενόμενος τρόπος αποθήκευσης PDF.')
+                self.db.record_pdf(client.id, row['mark'], state, source_hash,
                                    str(path), checksum, size)
                 result['saved'] += 1
+                result['printed'] += int(state == 'printed_unverified')
             except Pending as error:
                 self.db.record_pdf(client.id, row['mark'], error.state, source_hash)
                 result['pending'] += 1

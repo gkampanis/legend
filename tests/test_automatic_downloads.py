@@ -85,3 +85,4 @@ class AutomaticTests(unittest.TestCase):
             result=AutomaticPDFDownloader(self.db,direct=direct).run(self.client,self.root/'archive',threading.Event())
         self.assertEqual(result['saved'],2)
         self.assertTrue(factory.call_args.kwargs['headless'])
+        self.assertTrue(factory.call_args.kwargs['allow_print'])

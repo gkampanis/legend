@@ -43,11 +43,12 @@ VIEWER_SNAPSHOT = """async ({limit}) => {
 
 
 class BrowserPDFDownloader(PDFDownloader):
-    def __init__(self, database, *, timeout=90, headless=False, notice=lambda message: None):
+    def __init__(self, database, *, timeout=90, headless=False, notice=lambda message: None, allow_print=False):
         super().__init__(database)
         if not 0 < timeout <= 300:
             raise ValueError('Browser timeout must be between 0 and 300 seconds')
         self.timeout, self.headless, self.notice = timeout, headless, notice
+        self.allow_print = allow_print
         self.context = self.browser = self.playwright = None
 
     def run(self, client, destination, cancel, progress=lambda done, total: None, dates=None):
@@ -270,6 +271,13 @@ class BrowserPDFDownloader(PDFDownloader):
                     if challenge:
                         raise Pending('challenge')
                 await asyncio.sleep(0.25)
+            if cancel.is_set():
+                return None
+            if self.allow_print:
+                from .print_fallback import print_invoice_page
+                self.notice(f"MARK {row['mark']}: δεύτερη προσπάθεια, εκτύπωση φορτωμένου παραστατικού.")
+                invoice = self.db.invoice(client.id,row['mark'])
+                return await print_invoice_page(page,client,invoice,root,cancel)
             raise Pending('browser_timeout')
         except Pending:
             raise

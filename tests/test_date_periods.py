@@ -84,8 +84,10 @@ class DatePeriodTests(unittest.TestCase):
         self.assertEqual(self.db.count(self.client.id),1)
 
     def test_schema3_backup_keeps_documents_and_pdf_attempts(self):
+        import hashlib
         Synchronizer(self.db,PeriodAPI(xml_page([xml_invoice(100)]))).run(self.client.id)
-        self.db.record_pdf(self.client.id,100,'challenge','synthetic')
+        source = hashlib.sha256(self.db.invoice(self.client.id,100)['download_url'].encode()).hexdigest()
+        self.db.record_pdf(self.client.id,100,'challenge',source)
         before = self.db.checkpoint(self.client.id)
         with self.db.connection() as conn:
             conn.execute('DROP TABLE period_checkpoints')

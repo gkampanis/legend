@@ -123,6 +123,10 @@ class Database:
     def connection(self):
         conn = sqlite3.connect(self.path, timeout=15, isolation_level=None)
         conn.row_factory = sqlite3.Row
+        # Compare attempts to the current URL without persisting URLs a second time.
+        conn.create_function("source_digest", 1,
+                             lambda value: hashlib.sha256((value or "").encode()).hexdigest(),
+                             deterministic=True)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=FULL")
         try:
@@ -281,19 +285,63 @@ class Database:
             conn.commit()
         return self.checkpoint(client.id, checkpoint.period)
 
-    def invoices(self, client_id, offset=0, limit=200, dates=None):
+    @staticmethod
+    def _invoice_scope(client_id, dates=None):
+        """One classification shared by lists, counters and retry queues.
+
+        A later failed attempt does not discard an archived artifact. An explicit
+        missing/changed-artifact event invalidates older successes instead. Both
+        attempts and successes must belong to the invoice's current source URL.
+        """
+        from .pdf_downloads import SAVED_STATES
+        states = ",".join("?" for _ in SAVED_STATES)
         clause, values = (dates or DateRange()).sql("i.issue_date")
+        query = f"""SELECT i.*,
+            COALESCE(saved.state,attempt.state) AS pdf_state,
+            COALESCE(saved.source_hash,attempt.source_hash) AS pdf_source_hash,
+            saved.path AS pdf_path, saved.sha256 AS pdf_sha256,
+            saved.byte_count AS pdf_byte_count,
+            saved.id IS NOT NULL AS pdf_saved,
+            attempt.id IS NOT NULL AS pdf_attempted,
+            EXISTS(SELECT 1 FROM document_changes c WHERE c.client_id=i.client_id
+                AND c.invoice_mark=i.mark AND c.kind='cancellation') AS cancelled
+            FROM invoices i
+            LEFT JOIN pdf_attempts saved ON saved.id=(
+                SELECT p.id FROM pdf_attempts p
+                WHERE p.client_id=i.client_id AND p.mark=i.mark
+                AND p.source_hash=source_digest(i.download_url) AND p.state IN ({states})
+                AND p.id>COALESCE((SELECT max(t.id) FROM pdf_attempts t
+                    WHERE t.client_id=i.client_id AND t.mark=i.mark AND t.source_hash=p.source_hash
+                    AND t.state IN ('artifact_missing','artifact_changed')),0)
+                ORDER BY p.id DESC LIMIT 1)
+            LEFT JOIN pdf_attempts attempt ON attempt.id=(
+                SELECT p.id FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark
+                AND p.source_hash=source_digest(i.download_url) ORDER BY p.id DESC LIMIT 1)
+            WHERE i.client_id=?""" + clause
+        return query, (*SAVED_STATES, client_id, *values)
+
+    @staticmethod
+    def _bucket_clause(bucket):
+        if bucket == "all":
+            return ""
+        if bucket == "success":
+            return " WHERE pdf_saved=1"
+        if bucket == "failure":
+            return " WHERE pdf_attempted=1 AND pdf_saved=0 AND cancelled=0"
+        raise ApplicationError("Μη έγκυρη λίστα παραστατικών.")
+
+    def invoices(self, client_id, offset=0, limit=200, dates=None, bucket="all"):
+        query, values = self._invoice_scope(client_id, dates)
+        query = "SELECT * FROM (" + query + ")" + self._bucket_clause(bucket)
         with self.connection() as conn:
             return [dict(r) for r in conn.execute(
-                """SELECT i.*, (SELECT p.state FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_state, EXISTS(SELECT 1 FROM document_changes c
-                    WHERE c.client_id=i.client_id AND c.invoice_mark=i.mark AND c.kind='cancellation') AS cancelled
-                    FROM invoices i WHERE client_id=?""" + clause + " ORDER BY issue_date DESC, mark DESC LIMIT ? OFFSET ?",
-                (client_id, *values, limit, offset))]
+                query + " ORDER BY issue_date DESC,mark DESC LIMIT ? OFFSET ?",
+                (*values, limit, offset))]
 
-    def count(self, client_id, dates=None):
-        clause, values = (dates or DateRange()).sql()
+    def count(self, client_id, dates=None, bucket="all"):
+        query, values = self._invoice_scope(client_id, dates)
         with self.connection() as conn:
-            return conn.execute("SELECT count(*) FROM invoices WHERE client_id=?" + clause, (client_id, *values)).fetchone()[0]
+            return conn.execute("SELECT count(*) FROM (" + query + ")" + self._bucket_clause(bucket), values).fetchone()[0]
 
     def changes(self, client_id, limit=200):
         with self.connection() as conn:
@@ -311,20 +359,22 @@ class Database:
                 "SELECT * FROM events WHERE client_id=? ORDER BY id DESC LIMIT ?", (client_id, limit))]
 
     def download_candidates(self, client_id, dates=None):
-        clause, values = (dates or DateRange()).sql("i.issue_date")
+        query, values = self._invoice_scope(client_id, dates)
         with self.connection() as conn:
-            return [dict(r) for r in conn.execute("""SELECT i.mark,i.issue_date,i.issuer_vat,i.download_url,
-                (SELECT p.state FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_state,
-                (SELECT p.source_hash FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_source_hash
-                FROM invoices i WHERE i.client_id=? AND i.download_url IS NOT NULL
-                AND NOT EXISTS(SELECT 1 FROM document_changes c WHERE c.client_id=i.client_id
-                AND c.invoice_mark=i.mark AND c.kind='cancellation')""" + clause + " ORDER BY i.mark", (client_id, *values))]
+            # Fetch only small metadata, not raw invoice XML, across a batch.
+            return [dict(r) for r in conn.execute("""SELECT mark,issue_date,issuer_vat,download_url,
+                pdf_state,pdf_source_hash FROM (""" + query + ") WHERE download_url IS NOT NULL AND cancelled=0 ORDER BY mark", values)]
 
     def saved_pdf(self, client_id, mark, source_hash):
+        from .pdf_downloads import SAVED_STATES
+        states = ",".join("?" for _ in SAVED_STATES)
         with self.connection() as conn:
-            row = conn.execute("""SELECT * FROM pdf_attempts WHERE client_id=? AND mark=?
-                AND source_hash=? AND state IN ('saved_unverified','imported_unverified') ORDER BY id DESC LIMIT 1""",
-                (client_id, mark, source_hash)).fetchone()
+            row = conn.execute(f"""SELECT * FROM pdf_attempts p WHERE client_id=? AND mark=?
+                AND source_hash=? AND state IN ({states})
+                AND id>COALESCE((SELECT max(t.id) FROM pdf_attempts t
+                    WHERE t.client_id=p.client_id AND t.mark=p.mark AND t.source_hash=p.source_hash
+                    AND t.state IN ('artifact_missing','artifact_changed')),0)
+                ORDER BY id DESC LIMIT 1""", (client_id, mark, source_hash, *SAVED_STATES)).fetchone()
             return dict(row) if row else None
 
     def record_pdf(self, client_id, mark, state, source_hash, path=None, sha256=None, byte_count=0):
@@ -351,13 +401,11 @@ class Database:
                 if row['pdf_state'] in INTERACTIVE_STATES and row['pdf_source_hash'] == hashlib.sha256(row['download_url'].encode()).hexdigest()]
 
     def pdf_stats(self, client_id, dates=None):
-        clause,values=(dates or DateRange()).sql('i.issue_date')
+        query, values = self._invoice_scope(client_id, dates)
         with self.connection() as conn:
-            row=conn.execute("""SELECT count(*) AS total,
-                COALESCE(SUM(p.state IN ('saved_unverified','imported_unverified')),0) AS saved
-                FROM invoices i LEFT JOIN pdf_attempts p ON p.id=(SELECT max(p2.id) FROM pdf_attempts p2
-                    WHERE p2.client_id=i.client_id AND p2.mark=i.mark)
-                WHERE i.client_id=?"""+clause,(client_id,*values)).fetchone()
+            row=conn.execute("""SELECT count(*) AS total,COALESCE(SUM(pdf_saved),0) AS saved,
+                COALESCE(SUM(pdf_attempted=1 AND pdf_saved=0 AND cancelled=0),0) AS failed
+                FROM (""" + query + ")", values).fetchone()
             result=dict(row)
         result['pending']=len(self.pending_candidates(client_id,dates))
         return result

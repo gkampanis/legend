@@ -1,12 +1,14 @@
 import base64
+import asyncio
 import importlib.util
 import io
 import json
 import shutil
 import threading
 import unittest
+from types import SimpleNamespace
 from urllib.parse import urlsplit
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_pdf_downloads as pdf_helpers
 from myinvoices.browser_downloads import BrowserPDFDownloader
@@ -93,6 +95,36 @@ class BrowserDownloadTests(unittest.TestCase):
         self.assertTrue(result['cancelled'])
         self.assertEqual(result['saved'],0)
         self.assertIsNone(downloader.browser)
+        self.assertFalse(list(self.root.rglob('*.pdf')))
+        self.assertFalse(list(self.root.rglob('*.part')))
+
+    def test_cancel_at_capture_deadline_returns_without_printing(self):
+        cancel = threading.Event()
+        clock = [0.0]
+        page = SimpleNamespace(
+            url='https://provider.example/pdf', frames=[],
+            set_default_timeout=Mock(), on=Mock(), is_closed=Mock(return_value=False),
+            goto=AsyncMock(return_value=SimpleNamespace(headers={}, status=200)),
+            evaluate=AsyncMock(return_value=False), close=AsyncMock())
+        downloader = BrowserPDFDownloader(self.db, timeout=1, headless=True, allow_print=True)
+        downloader.context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+
+        async def finish_last_sleep(_delay):
+            # Cancellation and expiry occur during the final polling sleep.
+            cancel.set()
+            clock[0] = 2.0
+
+        async def capture():
+            with patch('myinvoices.browser_downloads.time', SimpleNamespace(monotonic=lambda: clock[0])), \
+                    patch('myinvoices.browser_downloads.asyncio.sleep', side_effect=finish_last_sleep), \
+                    patch('myinvoices.print_fallback.print_invoice_page', new_callable=AsyncMock) as printer:
+                result = await downloader._capture(self.client,
+                    {'mark':1, 'download_url':'https://provider.example/pdf'}, self.root, cancel)
+                self.assertIsNone(result)
+                printer.assert_not_awaited()
+
+        asyncio.run(capture())
+        page.close.assert_awaited_once()
         self.assertFalse(list(self.root.rglob('*.pdf')))
         self.assertFalse(list(self.root.rglob('*.part')))
 

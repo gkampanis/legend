@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk, filedialog, font as tkfont
 
+from . import __version__
 from .api import Environment, RequestDocsAPI
 from .demo import DemoAPI
 from .credential_store import default_store
@@ -40,7 +41,10 @@ class App:
         self.busy = False
         self.clients = {}
         self.selected = None
-        self.offset = 0
+        self.document_bucket = "all"
+        self.offsets = {bucket: 0 for bucket in ("all", "success", "failure")}
+        self.bucket_totals = dict(self.offsets)
+        self.visible_by_bucket = {bucket: {} for bucket in self.offsets}
         self.dates = DateRange() if demo else previous_month(today)
         self.date_from = tk.StringVar(value=self.dates.start.strftime('%d/%m/%Y') if self.dates.start else '')
         self.date_to = tk.StringVar(value=self.dates.end.strftime('%d/%m/%Y') if self.dates.end else '')
@@ -59,7 +63,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.8.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title(f"myInvoices Starter {__version__} — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -67,6 +71,34 @@ class App:
         self.poll_id = root.after(50, self._poll)
         root.bind("<Destroy>", self._destroy, add="+")
         self.refresh()
+
+    @property
+    def offset(self):
+        return self.offsets[self.document_bucket]
+
+    @offset.setter
+    def offset(self, value):
+        self.offsets[self.document_bucket] = value
+
+    def _reset_pages(self):
+        self.offsets = {bucket: 0 for bucket in self.offsets}
+
+    def _document_tab_changed(self, _event=None):
+        bucket = self.tab_buckets.get(self.document_book.select())
+        if bucket:
+            self.document_bucket = bucket
+            self.visible_documents = self.visible_by_bucket[bucket]
+            self.total = self.bucket_totals[bucket]
+            self._page_status()
+        self._paging_buttons()
+
+    def _paging_buttons(self):
+        active = self.document_book.select() in self.tab_buckets
+        self.previous.configure(state="normal" if active and not self.busy and self.offset > 0 else "disabled")
+        self.next.configure(state="normal" if active and not self.busy and self.offset + PAGE_SIZE < self.total else "disabled")
+
+    def _page_status(self):
+        self.status.set(f"Προβολή {self.offset + 1 if self.total else 0}–{min(self.offset + PAGE_SIZE, self.total)} από {self.total}.")
 
     def _build(self):
         style = ttk.Style(self.root)
@@ -159,27 +191,37 @@ class App:
         self.client_tree.bind("<Double-1>", lambda _event: self._edit_client())
         self.client_filter.trace_add("write", lambda *_args: self._filter_clients())
         ttk.Label(right, textvariable=self.summary, wraplength=750).pack(anchor="w", pady=(0, 8))
-        book = ttk.Notebook(right)
+        book = self.document_book = ttk.Notebook(right)
         book.pack(fill="both", expand=True)
-        documents, history, changes = ttk.Frame(book), ttk.Frame(book), ttk.Frame(book)
-        book.add(documents, text="Παραστατικά")
+        self.document_trees, self.tab_buckets = {}, {}
+        columns = ("date", "mark", "supplier", "identity", "total", "method", "status", "reason")
+        labels = ("Ημερομηνία", "MARK", "ΑΦΜ προμηθευτή", "Σειρά / Αριθμός", "Σύνολο",
+                  "Προέλευση PDF", "Κατάσταση PDF", "Αιτία / επόμενη ενέργεια")
+        for bucket, title in (("all", "Παραστατικά"), ("success", "Επιτυχημένα"), ("failure", "Αποτυχημένα")):
+            documents = ttk.Frame(book)
+            book.add(documents, text=title)
+            self.tab_buckets[str(documents)] = bucket
+            tree = ttk.Treeview(documents, columns=columns, show="headings")
+            tree.tag_configure("cancelled", foreground="#a82f2f")
+            for column, label in zip(columns, labels):
+                tree.heading(column, text=label)
+                tree.column(column, width=260 if column == "reason" else 150 if column in ("method", "status") else 130, minwidth=90)
+            vertical = ttk.Scrollbar(documents, orient="vertical", command=tree.yview)
+            horizontal = ttk.Scrollbar(documents, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            vertical.grid(row=0, column=1, sticky="ns")
+            horizontal.grid(row=1, column=0, sticky="ew")
+            documents.rowconfigure(0, weight=1)
+            documents.columnconfigure(0, weight=1)
+            self.document_trees[bucket] = tree
+        # Keep the original name for the complete invoice list.
+        self.document_tree = self.document_trees["all"]
+        self.success_tree, self.failure_tree = self.document_trees["success"], self.document_trees["failure"]
+        history, changes = ttk.Frame(book), ttk.Frame(book)
         book.add(history, text="Ιστορικό συγχρονισμού")
         book.add(changes, text="Ακυρώσεις / Μεταβολές")
-        columns = ("date", "mark", "supplier", "identity", "total", "status")
-        self.document_tree = ttk.Treeview(documents, columns=columns, show="headings")
-        self.document_tree.tag_configure("cancelled", foreground="#a82f2f")
-        labels = ("Ημερομηνία", "MARK", "ΑΦΜ προμηθευτή", "Σειρά / Αριθμός", "Σύνολο", "Κατάσταση PDF")
-        for column, label in zip(columns, labels):
-            self.document_tree.heading(column, text=label)
-            self.document_tree.column(column, width=130 if column != "status" else 260, minwidth=90)
-        vertical = ttk.Scrollbar(documents, orient="vertical", command=self.document_tree.yview)
-        horizontal = ttk.Scrollbar(documents, orient="horizontal", command=self.document_tree.xview)
-        self.document_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        self.document_tree.grid(row=0, column=0, sticky="nsew")
-        vertical.grid(row=0, column=1, sticky="ns")
-        horizontal.grid(row=1, column=0, sticky="ew")
-        documents.rowconfigure(0, weight=1)
-        documents.columnconfigure(0, weight=1)
+        book.bind("<<NotebookTabChanged>>", self._document_tab_changed)
         self.history_tree = ttk.Treeview(history, columns=("at", "kind", "count"), show="headings")
         for column, label in (("at", "Χρόνος UTC"), ("kind", "Ενέργεια"), ("count", "Εγγραφές σελίδας")):
             self.history_tree.heading(column, text=label)
@@ -277,8 +319,7 @@ class App:
             self.progress.stop()
             self.stop_button.configure(state="disabled")
             self.stop_button.pack_forget()
-            self.previous.configure(state="normal" if self.offset > 0 else "disabled")
-            self.next.configure(state="normal" if self.offset + PAGE_SIZE < self.total else "disabled")
+            self._paging_buttons()
 
     def _submit(self, operation, completion, on_error=None):
         if self.busy:
@@ -307,8 +348,7 @@ class App:
                 if kind == "confirm_pdf":
                     row,path,event,reply = payload
                     try:
-                        reply.append(messagebox.askyesno("PDF από browser",f"Νέο αρχείο: {path.name}\n"
-                            f"Αφορά το MARK {row['mark']} του επιλεγμένου πελάτη;",parent=self.root))
+                        reply.append(self._ask_pdf_provenance(row, path))
                     finally:
                         event.set()
                 elif kind == "browser_notice":
@@ -344,19 +384,26 @@ class App:
             self.credentials.clear()
             self.root.after_cancel(self.poll_id)
 
-    def _view(self, client_id, offset):
-        return (self.db.invoices(client_id, offset, PAGE_SIZE, self.dates), self.db.count(client_id, self.dates),
+    def _view(self, client_id):
+        offsets = dict(self.offsets)
+        pages, totals = {}, {}
+        for bucket in offsets:
+            total = self.db.count(client_id, self.dates, bucket=bucket)
+            actual_offset = min(offsets[bucket], ((total - 1) // PAGE_SIZE) * PAGE_SIZE) if total else 0
+            pages[bucket] = (self.db.invoices(client_id, actual_offset, PAGE_SIZE, self.dates, bucket=bucket), actual_offset)
+            totals[bucket] = total
+        return (pages, totals,
                 self.db.checkpoint(client_id), self.db.events(client_id),
                 self.db.change_count(client_id), self.db.changes(client_id),self.db.pdf_stats(client_id,self.dates))
 
     def refresh(self):
         if self.busy:
             return
-        selected, offset = self.selected, self.offset
+        selected = self.selected
         def work():
             clients = self.db.clients()
             client_id = selected if any(c.id == selected for c in clients) else (clients[0].id if clients else None)
-            return clients, client_id, self._view(client_id, offset) if client_id else None
+            return clients, client_id, self._view(client_id) if client_id else None
         def done(result):
             clients, client_id, view = result
             self.clients = {c.id: c for c in clients}
@@ -373,12 +420,13 @@ class App:
         selection = self.client_tree.selection()
         if not selection or selection[0] == self.selected:
             return
-        self.selected, self.offset = selection[0], 0
+        self.selected = selection[0]
+        self._reset_pages()
         client_id = self.selected
-        self._submit(lambda: self._view(client_id, 0), self._display)
+        self._submit(lambda: self._view(client_id), self._display)
 
     def _display(self, view):
-        rows, self.total, checkpoint, events, change_count, changes, stats = view
+        pages, self.bucket_totals, checkpoint, events, change_count, changes, stats = view
         self.stat_total.set(str(stats['total']))
         self.stat_saved.set(str(stats['saved']))
         self.stat_pending.set(str(stats['pending']))
@@ -387,16 +435,28 @@ class App:
         period_label = (f" · Περίοδος: {self.dates.start or 'αρχή'} — {self.dates.end or 'τέλος'}"
                         if self.dates.start or self.dates.end else " · Όλες οι ημερομηνίες")
         self.summary.set(f"{client.name} · ΑΦΜ {client.vat} · {ENVIRONMENTS[client.environment]}\n"
-                         f"Παραστατικά: {self.total} · Μεταβολές: {change_count} · MARK γενικού συγχρονισμού: {checkpoint.cursor}{pending}{period_label}")
-        self.document_tree.delete(*self.document_tree.get_children())
-        self.visible_documents = {str(row['mark']): row for row in rows}
-        for row in rows:
-            self.document_tree.insert("", "end", iid=str(row['mark']), values=(
-                row["issue_date"], row["mark"], row["issuer_vat"] or "Άγνωστο",
-                f'{row["series"] or ""} / {row["number"] or ""}',
-                row["total"] if row["total"] is not None else "—",
-                "Ακυρωμένο (myDATA)" if row["cancelled"] else (state_label(row["pdf_state"]) if row["pdf_state"] else STATUS[row["status"]])),
-                tags=("cancelled",) if row["cancelled"] else ())
+                         f"Παραστατικά: {stats['total']} · Μεταβολές: {change_count} · MARK γενικού συγχρονισμού: {checkpoint.cursor}{pending}{period_label}")
+        methods = {"saved_unverified": "Αρχικό PDF", "imported_unverified": "Εισαγωγή PDF",
+                   "printed_unverified": "Εκτύπωση σε PDF"}
+        for bucket, (rows, offset) in pages.items():
+            tree = self.document_trees[bucket]
+            selection = tree.selection()
+            tree.delete(*tree.get_children())
+            self.offsets[bucket] = offset
+            self.visible_by_bucket[bucket] = {str(row['mark']): row for row in rows}
+            for row in rows:
+                state = row["pdf_state"]
+                status = ("Ακυρωμένο (myDATA)" if row["cancelled"] else state_label(state) if row["pdf_saved"]
+                          else "Αποτυχημένη λήψη / εκκρεμεί" if row["pdf_attempted"] else STATUS[row["status"]])
+                reason = state_label(state) if row["pdf_attempted"] and not row["pdf_saved"] else ""
+                tree.insert("", "end", iid=str(row['mark']), values=(
+                    row["issue_date"], row["mark"], row["issuer_vat"] or "Άγνωστο",
+                    f'{row["series"] or ""} / {row["number"] or ""}',
+                    row["total"] if row["total"] is not None else "—", methods.get(state, "—"), status, reason),
+                    tags=("cancelled",) if row["cancelled"] else ())
+            tree.selection_set([item for item in selection if tree.exists(item)])
+        self.total = self.bucket_totals[self.document_bucket]
+        self.visible_documents = self.visible_by_bucket[self.document_bucket]
         self.history_tree.delete(*self.history_tree.get_children())
         for row in events:
             self.history_tree.insert("", "end", values=(row["at"], "Άντληση περιόδου" if row["kind"] == "period_page_committed" else "Αποθήκευση σελίδας", row["record_count"]))
@@ -405,14 +465,15 @@ class App:
             self.changes_tree.insert("", "end", values=(CHANGE_LABELS[row["kind"]],
                 row["event_mark"] if row["event_mark"] is not None else "Δεν δόθηκε",
                 row["invoice_mark"], row["cancellation_date"] or "—"))
-        self.status.set(f"Προβολή {self.offset + 1 if self.total else 0}–{min(self.offset + PAGE_SIZE, self.total)} από {self.total}.")
+        self._page_status()
+        self._paging_buttons()
 
     def _page(self, direction):
-        if self.busy or not self.selected:
+        if self.busy or not self.selected or self.document_book.select() not in self.tab_buckets:
             return
         self.offset = max(0, self.offset + direction * PAGE_SIZE)
-        client_id, offset = self.selected, self.offset
-        self._submit(lambda: self._view(client_id, offset), self._display)
+        client_id = self.selected
+        self._submit(lambda: self._view(client_id), self._display)
 
     def _sync(self):
         if self.busy or not self.selected:
@@ -438,7 +499,7 @@ class App:
             api = None
         self.cancel.clear()
         client_id = client.id
-        self.offset = 0
+        self._reset_pages()
         def work():
             selected_api = api
             if not self.demo:
@@ -450,7 +511,7 @@ class App:
             result = Synchronizer(self.db, selected_api).run(client_id, self.cancel,
                 lambda pages, records: self.queue.put(("progress", (pages, records))),
                 lambda stage: setattr(self, "operation_stage", stage), dates=dates)
-            return result, self._view(client_id, 0)
+            return result, self._view(client_id)
         def done(payload):
             result, view = payload
             self.last_result = result
@@ -481,7 +542,42 @@ class App:
         while not event.wait(0.1):
             if self.cancel.is_set() or self.closed:
                 return False
-        return bool(reply and reply[0])
+        return reply[0] if reply else False
+
+    def _ask_pdf_provenance(self, row, path):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Αντιστοίχιση PDF από browser")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        answer = [False]
+        timer = [None]
+        def clear_timer(event):
+            if event.widget is dialog and timer[0] is not None:
+                dialog.after_cancel(timer[0])
+                timer[0] = None
+        dialog.bind("<Destroy>", clear_timer, add="+")
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"Νέο αρχείο: {path.name}\nMARK: {row['mark']}\n\n"
+                  "Επιβεβαιώστε ότι αφορά το παραπάνω παραστατικό και επιλέξτε πώς το αποθηκεύσατε.",
+                  wraplength=560).pack(anchor="w", pady=(0, 14))
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x")
+        def choose(value):
+            answer[0] = value
+            dialog.destroy()
+        for label, value in (("Αρχικό PDF", "original"), ("PDF από εκτύπωση", "printed"), ("Άκυρο", False)):
+            ttk.Button(buttons, text=label, command=lambda choice=value: choose(choice)).pack(side="left", padx=4)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+        def check_cancel():
+            timer[0] = None
+            if self.cancel.is_set() or self.closed:
+                choose(False)
+            else:
+                timer[0] = dialog.after(100, check_cancel)
+        timer[0] = dialog.after(100, check_cancel)
+        self.root.wait_window(dialog)
+        return answer[0]
 
     def _apply_dates(self):
         if self.busy:
@@ -491,9 +587,10 @@ class App:
         except ApplicationError as error:
             self._message(str(error), error=True)
             return
-        self.dates, self.offset = dates, 0
+        self.dates = dates
+        self._reset_pages()
         if self.selected:
-            self._submit(lambda: self._view(self.selected, 0), self._display)
+            self._submit(lambda: self._view(self.selected), self._display)
 
     def _clear_dates(self):
         if not self.busy:
@@ -502,11 +599,12 @@ class App:
             self._apply_dates()
 
     def _selected_document(self):
-        selection = self.document_tree.selection()
+        bucket = self.tab_buckets.get(self.document_book.select())
+        selection = self.document_trees[bucket].selection() if bucket else ()
         if len(selection) != 1:
             self._message("Επιλέξτε ακριβώς ένα παραστατικό στη λίστα.", error=True)
             return None
-        return self.visible_documents.get(selection[0])
+        return self.visible_by_bucket[bucket].get(selection[0])
 
     def _open_provider(self):
         if self.busy or not self.selected:
@@ -550,7 +648,7 @@ class App:
         def work():
             self.operation_stage = "pdf_import"
             path = import_browser_pdf(self.db, client, row['mark'], source, destination, self.cancel)
-            return path, self._view(client.id, self.offset)
+            return path, self._view(client.id)
         def done(payload):
             path, view = payload
             self._display(view)
@@ -569,7 +667,7 @@ class App:
         except ApplicationError as error:
             self._message(str(error), error=True)
             return
-        self.offset = 0
+        self._reset_pages()
         destination = self.download_roots.get(self.selected)
         if not destination:
             destination = filedialog.askdirectory(title="Επιλέξτε φάκελο αποθήκευσης PDF",parent=self.root)
@@ -583,6 +681,10 @@ class App:
                 initialdir=str(initial if initial.is_dir() else Path.home()),parent=self.root)
             if not self.browser_download_folder:
                 return
+        if browser:
+            self._message("Θα ανοίξουν μόνο τα εκκρεμή. Αν δεν γίνεται λήψη, χρησιμοποιήστε την εκτύπωση "
+                          "του παραστατικού → Αποθήκευση ως PDF στον επιλεγμένο φάκελο λήψεων. "
+                          "Μετά επιβεβαιώστε το MARK και επιλέξτε «PDF από εκτύπωση».")
         client = self.clients[self.selected]
         self.cancel.clear()
         def work():
@@ -592,7 +694,7 @@ class App:
                           if browser else AutomaticPDFDownloader(self.db,direct=PDFDownloader(self.db),notice=notice))
             result = downloader.run(client, destination, self.cancel,
                 lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
-            return result, self._view(client.id, self.offset)
+            return result, self._view(client.id)
         def done(payload):
             result, view = payload
             self._display(view)
@@ -600,6 +702,8 @@ class App:
             reasons = " · ".join(f"{state_label(state)}: {count}" for state, count in sorted(result['reasons'].items()))
             message = (f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
                        f"Εκκρεμή σε αυτή την εργασία: {result['pending']}. Φάκελος: {destination}.")
+            if result.get('printed'):
+                message += f" Από εκτύπωση: {result['printed']}."
             if reasons:
                 message += f" Αιτίες: {reasons}."
             self._message(message)

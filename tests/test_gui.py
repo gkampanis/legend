@@ -30,7 +30,7 @@ class GUITests(unittest.TestCase):
                 self.assertFalse(app.busy)
                 self.assertEqual(len(app.changes_tree.get_children()), 4)
                 invoice_row = app.document_tree.get_children()[0]
-                self.assertEqual(app.document_tree.item(invoice_row, "values")[-1], "Ακυρωμένο (myDATA)")
+                self.assertEqual(app.document_tree.set(invoice_row, "status"), "Ακυρωμένο (myDATA)")
                 from unittest.mock import patch
                 from myinvoices.models import ParseError
                 def failed_check(*_args, **kwargs):
@@ -159,7 +159,7 @@ class GUITests(unittest.TestCase):
                 self.assertEqual(app.total, 2)
                 rows = app.document_tree.get_children()
                 self.assertEqual(len(rows), 2)
-                statuses = {app.document_tree.item(row, "values")[-1] for row in rows}
+                statuses = {app.document_tree.set(row, "status") for row in rows}
                 self.assertEqual(statuses, {"Χωρίς link PDF", "Υπάρχει link — PDF ανεξέλεγκτο"})
                 app._sync()
                 wait_for(lambda: not app.busy)
@@ -233,7 +233,7 @@ class GUITests(unittest.TestCase):
                 with patch('myinvoices.gui.filedialog.askopenfilename',return_value=str(source)), patch('myinvoices.gui.messagebox.askyesno',return_value=True), patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')):
                     app._import_pdf()
                     wait()
-                self.assertIn('PDF αποθηκευμένο',app.document_tree.item('101','values')[-1])
+                self.assertIn('PDF αποθηκευμένο',app.document_tree.set('101','status'))
                 self.assertEqual(source.read_bytes(),stream.getvalue())
                 with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.PDFDownloader',side_effect=lambda database: PDFDownloader(database,Opener(stream.getvalue()))):
                     app.pdf_button.invoke()
@@ -324,7 +324,7 @@ class GUITests(unittest.TestCase):
                 def opened(database,selected,mark,**kwargs):
                     self.assertEqual(mark,102)
                     (downloads/'invoice.pdf').write_bytes(data)
-                with patch('myinvoices.interactive_downloads.open_provider',side_effect=opened) as browser, patch('myinvoices.gui.messagebox.askyesno',return_value=True) as confirm:
+                with patch('myinvoices.interactive_downloads.open_provider',side_effect=opened) as browser, patch.object(app,'_ask_pdf_provenance',return_value='original') as confirm:
                     app.browser_pdf_button.invoke()
                     wait()
                     self.assertEqual(browser.call_count,1)

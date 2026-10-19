@@ -47,6 +47,11 @@ class InteractiveTests(unittest.TestCase):
             conn.execute('UPDATE invoices SET download_url=? WHERE mark=?',('https://provider.example/new',marks[0]))
         self.assertEqual(len(self.db.pending_candidates(self.client.id)),1)
         self.db.record_pdf(self.client.id,marks[1],'saved_unverified','synthetic','/synthetic',None,0)
+        # An unrelated source must not suppress the current source's pending work.
+        self.assertEqual(len(self.db.pending_candidates(self.client.id)),1)
+        import hashlib
+        source=hashlib.sha256(self.db.invoice(self.client.id,marks[1])['download_url'].encode()).hexdigest()
+        self.db.record_pdf(self.client.id,marks[1],'saved_unverified',source,'/synthetic',None,0)
         self.assertEqual(self.db.pending_candidates(self.client.id),[])
 
     def test_unrelated_or_multiple_downloads_need_confirmation(self):

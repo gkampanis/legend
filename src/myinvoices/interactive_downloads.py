@@ -4,7 +4,7 @@ import time
 
 from .models import ApplicationError
 from .pdf_downloads import (PDFDownloader, Pending, MAX_BYTES, open_provider,
-                            valid_pdf, archive_pdf_bytes)
+                            valid_pdf, archive_pdf_bytes, PDFArtifact)
 
 
 class InteractivePDFDownloader(PDFDownloader):
@@ -38,7 +38,8 @@ class InteractivePDFDownloader(PDFDownloader):
         except ApplicationError:
             raise Pending('browser_closed') from None
         self.notice(f"MARK {row['mark']}: ολοκληρώστε τον έλεγχο στον κανονικό browser και κατεβάστε το PDF "
-                    f"στον επιλεγμένο φάκελο λήψεων. Η εφαρμογή περιμένει το νέο αρχείο.")
+                    f"στον επιλεγμένο φάκελο λήψεων. Αν δεν γίνεται λήψη, χρησιμοποιήστε Εκτύπωση στον προβολέα "
+                    "του παραστατικού → Αποθήκευση ως PDF στον ίδιο φάκελο. Η εφαρμογή περιμένει το νέο αρχείο.")
         deadline=time.monotonic()+self.timeout
         last_signature=None
         stable_since=time.monotonic()
@@ -71,9 +72,13 @@ class InteractivePDFDownloader(PDFDownloader):
             except OSError:
                 continue
             # A normal browser can have other simultaneous downloads; confirmation is mandatory.
-            if not self.confirm(row,path):
+            provenance = self.confirm(row,path)
+            if not provenance:
                 if cancel.is_set():
                     return None
                 raise Pending('browser_confirmation')
-            return archive_pdf_bytes(data,client,row,root,cancel)
+            artifact = archive_pdf_bytes(data,client,row,root,cancel)
+            if artifact and provenance == 'printed':
+                return PDFArtifact(*artifact,'printed_unverified')
+            return artifact
         raise Pending('browser_timeout')
