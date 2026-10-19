@@ -62,3 +62,26 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(result['pending'],2)
         self.assertEqual(dict(result['reasons']),{'invalid_pdf':2})
         factory.assert_not_called()
+
+    def test_known_challenge_is_skipped_without_request_or_browser(self):
+        import hashlib
+        for row in self.db.download_candidates(self.client.id):
+            self.db.record_pdf(self.client.id,row['mark'],'challenge',hashlib.sha256(row['download_url'].encode()).hexdigest())
+        direct=Mock()
+        factory=Mock()
+        result=AutomaticPDFDownloader(self.db,direct=direct,browser_factory=factory).run(self.client,self.root/'archive',threading.Event())
+        self.assertEqual(dict(result['reasons']),{'challenge':2})
+        direct._download.assert_not_called()
+        factory.assert_not_called()
+
+    def test_default_dynamic_loader_is_headless(self):
+        from unittest.mock import patch
+        direct=PDFDownloader(self.db,pdf_helpers.Opener(b'<html>application</html>'))
+        browser=PDFDownloader(self.db,pdf_helpers.Opener(self.pdf))
+        @contextmanager
+        def session(): yield browser
+        browser.session=session
+        with patch('myinvoices.automatic_downloads.BrowserPDFDownloader',return_value=browser) as factory:
+            result=AutomaticPDFDownloader(self.db,direct=direct).run(self.client,self.root/'archive',threading.Event())
+        self.assertEqual(result['saved'],2)
+        self.assertTrue(factory.call_args.kwargs['headless'])

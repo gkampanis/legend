@@ -41,3 +41,10 @@ class DateRange:
         if not self.start or not self.end:
             raise ApplicationError('Για άντληση ΑΑΔΕ περιόδου συμπληρώστε και Από και Έως.')
         return self.start.isoformat(), self.end.isoformat()
+
+
+def previous_month(today=None):
+    from datetime import timedelta
+    today = today or date.today()
+    end = today.replace(day=1) - timedelta(days=1)
+    return DateRange(end.replace(day=1), end)

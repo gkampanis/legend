@@ -313,7 +313,9 @@ class Database:
     def download_candidates(self, client_id, dates=None):
         clause, values = (dates or DateRange()).sql("i.issue_date")
         with self.connection() as conn:
-            return [dict(r) for r in conn.execute("""SELECT i.mark,i.issue_date,i.issuer_vat,i.download_url
+            return [dict(r) for r in conn.execute("""SELECT i.mark,i.issue_date,i.issuer_vat,i.download_url,
+                (SELECT p.state FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_state,
+                (SELECT p.source_hash FROM pdf_attempts p WHERE p.client_id=i.client_id AND p.mark=i.mark ORDER BY p.id DESC LIMIT 1) AS pdf_source_hash
                 FROM invoices i WHERE i.client_id=? AND i.download_url IS NOT NULL
                 AND NOT EXISTS(SELECT 1 FROM document_changes c WHERE c.client_id=i.client_id
                 AND c.invoice_mark=i.mark AND c.kind='cancellation')""" + clause + " ORDER BY i.mark", (client_id, *values))]
@@ -342,3 +344,20 @@ class Database:
             return not (conn.execute("SELECT revision FROM checkpoints WHERE client_id=?", (client_id,)).fetchone()[0]
                 or conn.execute("SELECT count(*) FROM invoices WHERE client_id=?", (client_id,)).fetchone()[0]
                 or conn.execute("SELECT count(*) FROM period_checkpoints WHERE client_id=? AND revision>0", (client_id,)).fetchone()[0])
+
+    def pending_candidates(self, client_id, dates=None):
+        from .pdf_downloads import INTERACTIVE_STATES
+        return [row for row in self.download_candidates(client_id,dates)
+                if row['pdf_state'] in INTERACTIVE_STATES and row['pdf_source_hash'] == hashlib.sha256(row['download_url'].encode()).hexdigest()]
+
+    def pdf_stats(self, client_id, dates=None):
+        clause,values=(dates or DateRange()).sql('i.issue_date')
+        with self.connection() as conn:
+            row=conn.execute("""SELECT count(*) AS total,
+                COALESCE(SUM(p.state IN ('saved_unverified','imported_unverified')),0) AS saved
+                FROM invoices i LEFT JOIN pdf_attempts p ON p.id=(SELECT max(p2.id) FROM pdf_attempts p2
+                    WHERE p2.client_id=i.client_id AND p2.mark=i.mark)
+                WHERE i.client_id=?"""+clause,(client_id,*values)).fetchone()
+            result=dict(row)
+        result['pending']=len(self.pending_candidates(client_id,dates))
+        return result

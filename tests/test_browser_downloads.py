@@ -95,3 +95,9 @@ class BrowserDownloadTests(unittest.TestCase):
         self.assertIsNone(downloader.browser)
         self.assertFalse(list(self.root.rglob('*.pdf')))
         self.assertFalse(list(self.root.rglob('*.part')))
+
+    def test_headless_challenge_is_deferred_without_clicking(self):
+        html='<html><head><title>Just a moment...</title></head><body><div id="cf-chl-widget">Human verification</div></body></html>'
+        result=self.downloader(html,timeout=2).run(self.client,self.root/'archive',threading.Event())
+        self.assertEqual(dict(result['reasons']),{'challenge':2})
+        self.assertFalse(list((self.root/'archive').rglob('*.pdf')))

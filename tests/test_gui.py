@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from pathlib import Path
 import tempfile
 import time
@@ -21,7 +22,7 @@ class GUITests(unittest.TestCase):
             root = tk.Tk()
             root.withdraw()
             try:
-                app = App(root, database)
+                app = App(root, database,today=date(2026,11,1))
                 deadline = time.monotonic() + 10
                 while app.busy and time.monotonic() < deadline:
                     root.update()
@@ -36,7 +37,7 @@ class GUITests(unittest.TestCase):
                     kwargs["stage"]("xml")
                     raise ParseError("Μη αναμενόμενη απόκριση RequestDocs [XML_ROOT=Error].", "Error")
                 with patch("myinvoices.gui.check_client", side_effect=failed_check):
-                    app.check_button.invoke()
+                    app._check_api()
                     deadline = time.monotonic() + 10
                     while app.busy and time.monotonic() < deadline:
                         root.update()
@@ -44,13 +45,13 @@ class GUITests(unittest.TestCase):
                     self.assertFalse(app.busy)
                 self.assertIn("[xml]", app.last_error)
                 self.assertIn("XML_ROOT=Error", app.message_text.get("1.0", "end"))
-                app.copy_error_button.invoke()
+                app._copy_error()
                 self.assertEqual(root.clipboard_get(), app.last_error)
                 self.assertTrue((Path(directory) / "diagnostics.jsonl").exists())
                 message = "[xml] Μη αναμενόμενη απόκριση RequestDocs [XML_ROOT=Error]."
                 app._message(message, error=True)
                 app._message("Εργασία ολοκληρώθηκε")
-                app.copy_error_button.invoke()
+                app._copy_error()
                 self.assertEqual(root.clipboard_get(), message)
                 app._copy_messages()
                 self.assertIn(message, root.clipboard_get())
@@ -65,7 +66,7 @@ class GUITests(unittest.TestCase):
                 app._clear_messages()
                 self.assertEqual(app.message_text.get("1.0", "end-1c"), "")
                 self.assertEqual(app.last_error, "")
-                self.assertEqual(str(app.copy_error_button.cget("state")), "disabled")
+                self.assertEqual(str(app.messages_menu.entrycget(0,"state")), "disabled")
             finally:
                 root.destroy()
 
@@ -151,7 +152,7 @@ class GUITests(unittest.TestCase):
                 self.assertEqual(app.selected, client.id)
                 self.assertFalse(hasattr(app, "user_entry"))
                 self.assertFalse(hasattr(app, "key_entry"))
-                self.assertEqual(app.edit_button.cget("text"), "Στοιχεία πελάτη")
+                self.assertEqual(app.sync_button.cget("text"), "1. Εύρεση παραστατικών")
                 app._sync()
                 wait_for(lambda: not app.busy)
                 self.assertEqual(app.last_result.pages, 2)
@@ -215,20 +216,22 @@ class GUITests(unittest.TestCase):
                     self.assertFalse(app.busy)
                     self.assertEqual(errors,[])
                 wait()
+                app._clear_dates()
+                wait()
                 self.assertEqual(app.total,2)
                 app.date_from.set('01/10/2026')
                 app.date_to.set('31/10/2026')
-                app.dates_button.invoke()
+                app._apply_dates()
                 wait()
                 self.assertEqual(app.total,1)
                 self.assertEqual(app.document_tree.get_children(),('101',))
                 app.document_tree.selection_set('101')
                 with patch('myinvoices.gui.open_provider') as browser:
-                    app.browser_button.invoke()
+                    app._open_provider()
                     wait()
                     browser.assert_called_once_with(db,client,101)
                 with patch('myinvoices.gui.filedialog.askopenfilename',return_value=str(source)), patch('myinvoices.gui.messagebox.askyesno',return_value=True), patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')):
-                    app.import_button.invoke()
+                    app._import_pdf()
                     wait()
                 self.assertIn('PDF αποθηκευμένο',app.document_tree.item('101','values')[-1])
                 self.assertEqual(source.read_bytes(),stream.getvalue())
@@ -237,16 +240,98 @@ class GUITests(unittest.TestCase):
                     wait()
                 self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
                 app.document_tree.selection_remove(*app.document_tree.selection())
-                with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.BrowserPDFDownloader',side_effect=lambda database, **kwargs: PDFDownloader(database,Opener(stream.getvalue()))) as browser_batch:
+                with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.InteractivePDFDownloader',side_effect=lambda database, *args, **kwargs: PDFDownloader(database,Opener(stream.getvalue()))) as browser_batch:
                     app.browser_pdf_button.invoke()
                     wait()
                     self.assertEqual(browser_batch.call_count,1)
                 self.assertIn('Ήδη αποθηκευμένα: 1',app.status.get())
                 app.date_from.set('31/02/2026')
-                app.dates_button.invoke()
+                app._apply_dates()
                 self.assertIn('ΗΗ/ΜΜ/ΕΕΕΕ',app.last_error)
-                app.clear_dates_button.invoke()
+                app._clear_dates()
+                wait()
+                app._clear_dates()
                 wait()
                 self.assertEqual(app.total,2)
+            finally:
+                root.destroy()
+
+    def test_three_primary_steps_and_previous_month_default(self):
+        import tkinter as tk
+        from myinvoices.database import Database
+        from myinvoices.gui import App
+        with tempfile.TemporaryDirectory() as directory:
+            db=Database(Path(directory)/'gui.sqlite3')
+            db.add_client('Synthetic','000000000')
+            root=tk.Tk()
+            root.withdraw()
+            try:
+                app=App(root,db,today=date(2026,10,19))
+                deadline=time.monotonic()+10
+                while app.busy and time.monotonic()<deadline:
+                    root.update()
+                    time.sleep(0.01)
+                self.assertFalse(app.busy)
+                self.assertEqual((app.date_from.get(),app.date_to.get()),('01/09/2026','30/09/2026'))
+                self.assertEqual([button.cget('text') for button in (app.sync_button,app.pdf_button,app.browser_pdf_button)],
+                                 ['1. Εύρεση παραστατικών','2. Λήψη PDF','3. Εκκρεμή στον browser'])
+                self.assertEqual((app.stat_total.get(),app.stat_saved.get(),app.stat_pending.get()),('0','0','0'))
+                self.assertEqual(app.stop_button.winfo_manager(),'')
+                self.assertFalse(hasattr(app,'add_button'))
+            finally:
+                root.destroy()
+
+    def test_second_pass_confirmation_queue_archives_only_pending_invoice(self):
+        import hashlib,io,threading
+        import tkinter as tk
+        from unittest.mock import patch
+        from pypdf import PdfWriter
+        from myinvoices.database import Database
+        from myinvoices.demo import DemoAPI
+        from myinvoices.sync import Synchronizer
+        from myinvoices.gui import App
+        with tempfile.TemporaryDirectory() as folder:
+            directory=Path(folder)
+            db=Database(directory/'gui.sqlite3')
+            client=db.add_client('Synthetic','000000000')
+            Synchronizer(db,DemoAPI()).run(client.id,threading.Event())
+            with db.connection() as conn:
+                conn.execute("UPDATE invoices SET download_url='https://provider.example/102',status='url_available' WHERE mark=102")
+            writer=PdfWriter();writer.add_blank_page(width=100,height=100)
+            stream=io.BytesIO();writer.write(stream)
+            data=stream.getvalue()
+            existing=directory/'existing.pdf';existing.write_bytes(data)
+            for row in db.download_candidates(client.id):
+                source=hashlib.sha256(row['download_url'].encode()).hexdigest()
+                db.record_pdf(client.id,row['mark'],'saved_unverified' if row['mark']==101 else 'challenge',source,
+                              str(existing) if row['mark']==101 else None,hashlib.sha256(data).hexdigest(),len(data))
+            downloads=directory/'Downloads';downloads.mkdir()
+            root=tk.Tk();root.withdraw()
+            errors=[]
+            root.report_callback_exception=lambda *error:errors.append(error)
+            try:
+                app=App(root,db,today=date(2026,11,1))
+                def wait():
+                    deadline=time.monotonic()+10
+                    while app.busy and time.monotonic()<deadline:
+                        root.update();time.sleep(0.01)
+                    self.assertFalse(app.busy)
+                    self.assertEqual(errors,[])
+                wait()
+                self.assertEqual(app.stat_pending.get(),'1')
+                app.download_roots[client.id]=str(directory/'archive')
+                app.browser_download_folder=str(downloads)
+                def opened(database,selected,mark,**kwargs):
+                    self.assertEqual(mark,102)
+                    (downloads/'invoice.pdf').write_bytes(data)
+                with patch('myinvoices.interactive_downloads.open_provider',side_effect=opened) as browser, patch('myinvoices.gui.messagebox.askyesno',return_value=True) as confirm:
+                    app.browser_pdf_button.invoke()
+                    wait()
+                    self.assertEqual(browser.call_count,1)
+                    self.assertEqual(confirm.call_count,1)
+                self.assertEqual((app.stat_saved.get(),app.stat_pending.get()),('2','0'))
+                self.assertEqual(len(list((directory/'archive').rglob('*.pdf'))),1)
+                self.assertEqual(existing.read_bytes(),data)
+                self.assertTrue((downloads/'invoice.pdf').exists())
             finally:
                 root.destroy()

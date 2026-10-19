@@ -1,4 +1,4 @@
-"""One download action: direct retrieval, then browser only for page-based sources."""
+"""Background first pass: direct/dynamic retrieval; human challenges remain pending."""
 from contextlib import ExitStack
 
 from .models import ApplicationError
@@ -13,7 +13,7 @@ class AutomaticPDFDownloader(PDFDownloader):
         super().__init__(database)
         self.direct = direct or PDFDownloader(database)
         self.notice = notice
-        self.browser_factory = browser_factory or (lambda: BrowserPDFDownloader(database,notice=notice))
+        self.browser_factory = browser_factory or (lambda: BrowserPDFDownloader(database,notice=notice,headless=True,timeout=15))
         self.browser = None
         self.browser_unavailable = False
 
@@ -25,14 +25,19 @@ class AutomaticPDFDownloader(PDFDownloader):
             return super().run(client,destination,cancel,progress,dates)
 
     def _download(self, client, row, root, cancel):
+        import hashlib
+        if row.get('pdf_state') in {'challenge','http_403'} and row.get('pdf_source_hash') == hashlib.sha256(row['download_url'].encode()).hexdigest():
+            raise Pending('challenge')
         try:
             return self.direct._download(client,row,root,cancel)
         except Pending as error:
+            if error.state in {'challenge','http_403'}:
+                raise Pending('challenge') from None
             if error.state not in BROWSER_STATES:
                 raise
         if cancel.is_set():
             return None
-        self.notice(f"MARK {row['mark']}: η πηγή είναι ιστοσελίδα· συνεχίζω αυτόματα μέσω browser.")
+        self.notice(f"MARK {row['mark']}: ανάκτηση δυναμικής σελίδας στο παρασκήνιο.")
         if self.browser_unavailable:
             raise Pending('browser_unavailable')
         if self.browser is None:

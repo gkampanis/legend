@@ -117,3 +117,8 @@ class DatePeriodTests(unittest.TestCase):
         Synchronizer(self.db,PeriodAPI(xml_page([xml_invoice(701)]))).run(self.client.id)
         self.assertEqual(self.db.checkpoint(self.client.id).cursor,701)
         self.assertEqual(self.db.checkpoint(self.client.id,self.dates.period).cursor,101)
+
+    def test_previous_month_handles_year_boundary_and_leap_year(self):
+        from myinvoices.date_range import previous_month
+        self.assertEqual(previous_month(date(2026,1,15)),DateRange(date(2025,12,1),date(2025,12,31)))
+        self.assertEqual(previous_month(date(2024,3,1)),DateRange(date(2024,2,1),date(2024,2,29)))

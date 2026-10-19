@@ -11,7 +11,7 @@ from urllib.request import getproxies
 
 from .models import ApplicationError
 from .pdf_downloads import (PDFDownloader, Pending, MAX_BYTES, validate_url, archive_folder,
-                            valid_pdf, digest_file, publish_pdf)
+                            valid_pdf, digest_file, publish_pdf, archive_pdf_bytes)
 from .provider_documents import decode_pdf_data, ResolutionError
 
 # Read the PDF explicitly embedded in the visible document, including Blob and PDF.js.
@@ -116,31 +116,7 @@ class BrowserPDFDownloader(PDFDownloader):
         return self.runner.run(self._capture(client, row, root, cancel))
 
     def _archive(self, data, client, row, root, cancel):
-        if len(data) > MAX_BYTES:
-            raise Pending('too_large')
-        if not data.startswith(b'%PDF-'):
-            raise Pending('invalid_pdf')
-        temporary = None
-        try:
-            folder = archive_folder(root, client, row)
-            with tempfile.NamedTemporaryFile(dir=folder,suffix='.part',delete=False) as stream:
-                temporary = Path(stream.name)
-                for offset in range(0,len(data),65536):
-                    if cancel.is_set():
-                        return None
-                    stream.write(data[offset:offset+65536])
-                stream.flush()
-                os.fsync(stream.fileno())
-            if not valid_pdf(temporary):
-                raise Pending('invalid_pdf')
-            checksum = digest_file(temporary)
-            final = publish_pdf(temporary,folder,row['mark'],cancel)
-            return (final,checksum,len(data)) if final else None
-        except OSError:
-            raise Pending('storage_error') from None
-        finally:
-            if temporary:
-                temporary.unlink(missing_ok=True)
+        return archive_pdf_bytes(data,client,row,root,cancel)
 
     async def _download_event(self, download, client, row, root, cancel, deadline):
         from playwright.async_api import Error
@@ -195,7 +171,8 @@ class BrowserPDFDownloader(PDFDownloader):
         page.set_default_timeout(15000)
         finished, downloads = {}, []
         deadline = time.monotonic() + self.timeout
-        self.notice(f"MARK {row['mark']}: φόρτωση στον browser. Αν εμφανιστεί έλεγχος, ολοκληρώστε τον εκεί.")
+        self.notice(f"MARK {row['mark']}: φόρτωση δυναμικού PDF στο παρασκήνιο." if self.headless else
+                    f"MARK {row['mark']}: φόρτωση στον browser.")
 
         async def record(request):
             try:
@@ -211,7 +188,12 @@ class BrowserPDFDownloader(PDFDownloader):
         page.on('download',lambda download: downloads.append(download))
         try:
             try:
-                await page.goto(row['download_url'],wait_until='domcontentloaded',timeout=min(30000,self.timeout*1000))
+                navigation = await page.goto(row['download_url'],wait_until='domcontentloaded',timeout=min(30000,self.timeout*1000))
+                if self.headless and navigation:
+                    if navigation.headers.get('cf-mitigated') == 'challenge' or navigation.status == 403:
+                        raise Pending('challenge')
+                    if navigation.status == 429:
+                        raise Pending('http_429')
             except (BrowserTimeout,Error):
                 # A direct PDF download can abort navigation while emitting download.
                 if page.is_closed():
@@ -279,6 +261,14 @@ class BrowserPDFDownloader(PDFDownloader):
                         raise Pending('too_large')
                     data = await asyncio.wait_for(response.body(),timeout=15)
                     return self._archive(data,client,row,root,cancel)
+                if self.headless:
+                    challenge = await page.evaluate("""() => {
+                      const visible=e=>!!e.getClientRects().length;
+                      return /just a moment|attention required/i.test(document.title) ||
+                        [...document.querySelectorAll('iframe[src*="challenges.cloudflare.com"],.cf-turnstile,[id^="cf-chl-"]')].some(visible);
+                    }""")
+                    if challenge:
+                        raise Pending('challenge')
                 await asyncio.sleep(0.25)
             raise Pending('browser_timeout')
         except Pending:

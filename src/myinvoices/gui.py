@@ -5,7 +5,8 @@ import threading
 import tkinter as tk
 import unicodedata
 from datetime import datetime
-from tkinter import messagebox, ttk, filedialog
+from pathlib import Path
+from tkinter import messagebox, ttk, filedialog, font as tkfont
 
 from .api import Environment, RequestDocsAPI
 from .demo import DemoAPI
@@ -15,9 +16,9 @@ from .models import ApplicationError, Credentials
 from .local_check import check_client
 from .sync import Synchronizer
 from .pdf_downloads import PDFDownloader, state_label, open_provider, import_browser_pdf
-from .date_range import DateRange
-from .browser_downloads import BrowserPDFDownloader
+from .date_range import DateRange, previous_month
 from .automatic_downloads import AutomaticPDFDownloader
+from .interactive_downloads import InteractivePDFDownloader
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -28,8 +29,11 @@ CHANGE_LABELS = {"cancellation": "Ακύρωση", "income_classification": "Χ�
 
 
 class App:
-    def __init__(self, root, database, demo=False, credential_store=None):
+    def __init__(self, root, database, demo=False, credential_store=None, today=None):
         self.root, self.db, self.demo = root, database, demo
+        self.font_family = 'Segoe UI' if 'Segoe UI' in tkfont.families(root) else 'Helvetica'
+        for name in ('TkDefaultFont','TkTextFont','TkMenuFont','TkHeadingFont'):
+            tkfont.nametofont(name,root=root).configure(family=self.font_family,size=10)
         self.credentials = credential_store or default_store(database.path.parent / "credentials")
         self.queue = queue.Queue()
         self.cancel = threading.Event()
@@ -37,9 +41,14 @@ class App:
         self.clients = {}
         self.selected = None
         self.offset = 0
-        self.dates = DateRange()
-        self.date_from = tk.StringVar()
-        self.date_to = tk.StringVar()
+        self.dates = DateRange() if demo else previous_month(today)
+        self.date_from = tk.StringVar(value=self.dates.start.strftime('%d/%m/%Y') if self.dates.start else '')
+        self.date_to = tk.StringVar(value=self.dates.end.strftime('%d/%m/%Y') if self.dates.end else '')
+        self.download_roots = {}
+        self.browser_download_folder = None
+        self.stat_total = tk.StringVar(value='0')
+        self.stat_saved = tk.StringVar(value='0')
+        self.stat_pending = tk.StringVar(value='0')
         self.visible_documents = {}
         self.total = 0
         self.last_result = None
@@ -50,7 +59,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.7.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.8.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -63,61 +72,69 @@ class App:
         style = ttk.Style(self.root)
         if "vista" in style.theme_names():
             style.theme_use("vista")
-        style.configure(".", font=("Segoe UI", 10))
+        style.configure(".", font=(self.font_family, 10))
         style.configure("Treeview", rowheight=28)
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        style.configure("Treeview.Heading", font=(self.font_family, 10, "bold"))
         style.configure("TButton", padding=(8, 5))
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill="both", expand=True)
         title = "myInvoices — Δοκιμαστική έκδοση"
-        ttk.Label(outer, text=title, font=("Segoe UI", 17, "bold")).pack(anchor="w")
+        ttk.Label(outer, text=title, font=(self.font_family, 17, "bold")).pack(anchor="w")
         notice = ("OFFLINE DEMO: συνθετικά στοιχεία, χωρίς σύνδεση ή λήψη PDF."
                   if self.demo else
-                  "Στοιχεία και σύνδεση ανά πελάτη · Έλεγχος API χωρίς αποθήκευση παραστατικών · PDF: άμεση λήψη ή φόρτωση μέσω browser.")
+                  "Επιλέξτε πελάτη και περίοδο → εύρεση παραστατικών → λήψη PDF → δεύτερο πέρασμα μόνο για εκκρεμή.")
         ttk.Label(outer, text=notice, wraplength=1050).pack(anchor="w", pady=(4, 10))
         if self.demo:
             ttk.Label(outer, text="Για ενεργά πεδία API: κλείστε το demo και ανοίξτε START_MYINVOICES.bat.",
                       wraplength=1050).pack(anchor="w", pady=(0, 8))
-        bar = ttk.Frame(outer)
-        bar.pack(fill="x")
-        self.add_button = ttk.Button(bar, text="Νέος πελάτης", command=self._client_form)
-        self.add_button.pack(side="left")
-        self.edit_button = ttk.Button(bar, text="Στοιχεία πελάτη", command=self._edit_client)
-        self.edit_button.pack(side="left", padx=6)
-        self.refresh_button = ttk.Button(bar, text="Ανανέωση", command=self.refresh)
-        self.refresh_button.pack(side="left", padx=6)
-        self.check_button = ttk.Button(bar, text="Έλεγχος σύνδεσης API", command=self._check_api)
-        self.check_button.pack(side="left", padx=6)
-        self.sync_button = ttk.Button(bar, text="Συγχρονισμός επιλεγμένου", command=self._sync)
-        self.sync_button.pack(side="left")
-        self.stop_button = ttk.Button(bar, text="Διακοπή", command=self._stop, state="disabled")
-        self.stop_button.pack(side="left", padx=6)
-        ttk.Label(outer, text="Τα API credentials και το περιβάλλον ορίζονται στα στοιχεία κάθε πελάτη.").pack(anchor="w", pady=10)
-        pdf_bar = ttk.Frame(outer)
-        pdf_bar.pack(fill="x", pady=(0, 8))
-        self.pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF", command=self._download_pdfs)
-        self.pdf_button.pack(side="left")
-        self.browser_pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF μέσω browser", command=lambda: self._download_pdfs(browser=True))
-        self.browser_pdf_button.pack(side="left", padx=6)
-        manual_bar = ttk.Frame(outer)
-        manual_bar.pack(fill="x", pady=(0, 8))
-        self.browser_button = ttk.Button(manual_bar, text="Άνοιγμα επιλεγμένου στον browser", command=self._open_provider)
-        self.browser_button.pack(side="left", padx=6)
-        self.import_button = ttk.Button(manual_bar, text="Εισαγωγή PDF από browser", command=self._import_pdf)
-        self.import_button.pack(side="left")
-        date_bar = ttk.Frame(outer)
-        date_bar.pack(fill="x", pady=(0, 8))
-        ttk.Label(date_bar, text="Ημερομηνία παραστατικού · Από:").pack(side="left")
-        self.from_entry = ttk.Entry(date_bar, textvariable=self.date_from, width=13)
-        self.from_entry.pack(side="left", padx=5)
-        ttk.Label(date_bar, text="Έως:").pack(side="left")
-        self.to_entry = ttk.Entry(date_bar, textvariable=self.date_to, width=13)
-        self.to_entry.pack(side="left", padx=5)
-        self.dates_button = ttk.Button(date_bar, text="Εφαρμογή", command=self._apply_dates)
-        self.dates_button.pack(side="left")
-        self.clear_dates_button = ttk.Button(date_bar, text="Όλες οι ημερομηνίες", command=self._clear_dates)
-        self.clear_dates_button.pack(side="left", padx=5)
-        ttk.Label(date_bar, text="ΗΗ/ΜΜ/ΕΕΕΕ · ισχύει σε άντληση, προβολή και λήψη PDF").pack(side="left")
+        menu = tk.Menu(self.root,tearoff=False)
+        self.root.configure(menu=menu)
+        clients_menu = tk.Menu(menu,tearoff=False)
+        clients_menu.add_command(label="Νέος πελάτης…",command=self._client_form)
+        clients_menu.add_command(label="Στοιχεία πελάτη…",command=self._edit_client)
+        clients_menu.add_command(label="Ανανέωση τοπικής λίστας",command=self.refresh)
+        menu.add_cascade(label="Πελάτης",menu=clients_menu)
+        tools = tk.Menu(menu,tearoff=False)
+        for text,command in (("Έλεγχος σύνδεσης API",self._check_api),("Άνοιγμα επιλεγμένου στον browser",self._open_provider),
+                             ("Χειροκίνητη εισαγωγή PDF…",self._import_pdf),("Επιλογή φακέλου PDF…",self._choose_destination),
+                             ("Προηγούμενος μήνας",self._previous_month),("Όλες οι ημερομηνίες",self._clear_dates),
+                             ("Εφαρμογή περιόδου στη λίστα",self._apply_dates)):
+            tools.add_command(label=text,command=command)
+        menu.add_cascade(label="Περισσότερα",menu=tools)
+        self.main_menu = menu
+        self.messages_menu = tk.Menu(menu,tearoff=False)
+        self.messages_menu.add_command(label="Αντιγραφή τελευταίου σφάλματος",command=self._copy_error,state="disabled")
+        self.messages_menu.add_command(label="Αντιγραφή όλων",command=self._copy_messages)
+        self.messages_menu.add_command(label="Καθαρισμός μηνυμάτων",command=self._clear_messages)
+        menu.add_cascade(label="Μηνύματα",menu=self.messages_menu)
+        dashboard = ttk.Frame(outer)
+        dashboard.pack(fill="x",pady=(0,12))
+        period = ttk.LabelFrame(dashboard,text="Περίοδος έκδοσης",padding=10)
+        period.pack(side="left",fill="y",padx=(0,10))
+        ttk.Label(period,text="Από").grid(row=0,column=0,sticky="w")
+        self.from_entry = ttk.Entry(period,textvariable=self.date_from,width=13)
+        self.from_entry.grid(row=0,column=1,padx=5,pady=3)
+        ttk.Label(period,text="Έως").grid(row=1,column=0,sticky="w")
+        self.to_entry = ttk.Entry(period,textvariable=self.date_to,width=13)
+        self.to_entry.grid(row=1,column=1,padx=5,pady=3)
+        for entry in (self.from_entry,self.to_entry):
+            entry.bind('<Return>',lambda _event:self._apply_dates())
+        ttk.Label(period,text="ΗΗ/ΜΜ/ΕΕΕΕ",foreground="#666666").grid(row=2,column=0,columnspan=2)
+        cards = ttk.Frame(dashboard)
+        cards.pack(side="left",fill="both",expand=True)
+        for title,value,color in (("Παραστατικά",self.stat_total,"#375566"),("PDF αποθηκευμένα",self.stat_saved,"#28745b"),
+                                  ("Εκκρεμή browser",self.stat_pending,"#b67a12")):
+            card = tk.Frame(cards,bg=color,padx=14,pady=10)
+            card.pack(side="left",fill="both",expand=True,padx=3)
+            tk.Label(card,text=title,bg=color,fg="white",font=(self.font_family,10,"bold")).pack(anchor="w")
+            tk.Label(card,textvariable=value,bg=color,fg="white",font=(self.font_family,26,"bold")).pack(anchor="e")
+        actions = ttk.Frame(dashboard)
+        actions.pack(side="right",padx=(10,0),fill="y")
+        self.sync_button = ttk.Button(actions,text="1. Εύρεση παραστατικών",command=self._sync)
+        self.pdf_button = ttk.Button(actions,text="2. Λήψη PDF",command=self._download_pdfs)
+        self.browser_pdf_button = ttk.Button(actions,text="3. Εκκρεμή στον browser",command=lambda:self._download_pdfs(browser=True))
+        for button in (self.sync_button,self.pdf_button,self.browser_pdf_button):
+            button.pack(fill="x",pady=2)
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True)
         left, right = ttk.Frame(body), ttk.Frame(body)
@@ -185,18 +202,13 @@ class App:
         self.next = ttk.Button(paging, text="Επόμενα", command=lambda: self._page(1))
         self.next.pack(side="left", padx=6)
         ttk.Label(paging, text="Προβολή έως 200 εγγραφών ανά σελίδα").pack(side="right")
+        self.stop_button = ttk.Button(outer,text="Διακοπή εργασίας",command=self._stop,state="disabled")
         self.progress = ttk.Progressbar(outer, mode="indeterminate")
         self.progress.pack(fill="x", pady=(10, 4))
         ttk.Label(outer, textvariable=self.status, wraplength=1050).pack(anchor="w")
         messages = ttk.LabelFrame(outer, text="Μηνύματα και σφάλματα — επιλογή κειμένου / Ctrl+C", padding=6)
         messages.pack(fill="x", pady=(8, 0))
-        actions = ttk.Frame(messages)
-        actions.pack(fill="x", pady=(0, 4))
-        self.copy_error_button = ttk.Button(actions, text="Αντιγραφή τελευταίου σφάλματος", command=self._copy_error, state="disabled")
-        self.copy_error_button.pack(side="left")
-        ttk.Button(actions, text="Αντιγραφή όλων", command=self._copy_messages).pack(side="left", padx=6)
-        ttk.Button(actions, text="Καθαρισμός", command=self._clear_messages).pack(side="right")
-        self.message_text = tk.Text(messages, height=5, wrap="word", font=("Segoe UI", 10), state="disabled")
+        self.message_text = tk.Text(messages, height=5, wrap="word", font=(self.font_family, 10), state="disabled")
         message_scroll = ttk.Scrollbar(messages, orient="vertical", command=self.message_text.yview)
         self.message_text.configure(yscrollcommand=message_scroll.set)
         message_scroll.pack(side="right", fill="y")
@@ -224,7 +236,7 @@ class App:
         self.message_text.delete("1.0", "end")
         self.message_text.configure(state="disabled")
         self.last_error = ""
-        self.copy_error_button.configure(state="disabled")
+        self.messages_menu.entryconfigure(0,state="disabled")
 
     def _message(self, message, error=False):
         self.status.set(message)
@@ -237,7 +249,7 @@ class App:
         self.message_text.see("end")
         if error:
             self.last_error = message
-            self.copy_error_button.configure(state="normal")
+            self.messages_menu.entryconfigure(0,state="normal")
 
     def _filter_clients(self):
         def normalize(value):
@@ -253,14 +265,18 @@ class App:
 
     def _set_busy(self, value):
         self.busy = value
-        for widget in (self.add_button, self.edit_button, self.refresh_button, self.sync_button, self.check_button, self.pdf_button, self.browser_pdf_button, self.browser_button, self.import_button, self.from_entry, self.to_entry, self.dates_button, self.clear_dates_button, self.search_entry, self.previous, self.next):
+        for widget in (self.sync_button,self.pdf_button,self.browser_pdf_button,self.from_entry,self.to_entry,self.search_entry,self.previous,self.next):
             widget.configure(state="disabled" if value else "normal")
+        for index in (0,1):
+            self.main_menu.entryconfigure(index,state="disabled" if value else "normal")
         self.client_tree.configure(selectmode="none" if value else "browse")
         if value:
+            self.stop_button.pack(anchor="e",before=self.progress)
             self.progress.start(12)
         else:
             self.progress.stop()
             self.stop_button.configure(state="disabled")
+            self.stop_button.pack_forget()
             self.previous.configure(state="normal" if self.offset > 0 else "disabled")
             self.next.configure(state="normal" if self.offset + PAGE_SIZE < self.total else "disabled")
 
@@ -288,7 +304,14 @@ class App:
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
-                if kind == "browser_notice":
+                if kind == "confirm_pdf":
+                    row,path,event,reply = payload
+                    try:
+                        reply.append(messagebox.askyesno("PDF από browser",f"Νέο αρχείο: {path.name}\n"
+                            f"Αφορά το MARK {row['mark']} του επιλεγμένου πελάτη;",parent=self.root))
+                    finally:
+                        event.set()
+                elif kind == "browser_notice":
                     self._message(payload)
                 elif kind == "pdf_progress":
                     done, total = payload
@@ -324,7 +347,7 @@ class App:
     def _view(self, client_id, offset):
         return (self.db.invoices(client_id, offset, PAGE_SIZE, self.dates), self.db.count(client_id, self.dates),
                 self.db.checkpoint(client_id), self.db.events(client_id),
-                self.db.change_count(client_id), self.db.changes(client_id))
+                self.db.change_count(client_id), self.db.changes(client_id),self.db.pdf_stats(client_id,self.dates))
 
     def refresh(self):
         if self.busy:
@@ -355,7 +378,10 @@ class App:
         self._submit(lambda: self._view(client_id, 0), self._display)
 
     def _display(self, view):
-        rows, self.total, checkpoint, events, change_count, changes = view
+        rows, self.total, checkpoint, events, change_count, changes, stats = view
+        self.stat_total.set(str(stats['total']))
+        self.stat_saved.set(str(stats['saved']))
+        self.stat_pending.set(str(stats['pending']))
         client = self.clients[self.selected]
         pending = " · Υπάρχει συνέχεια γενικού συγχρονισμού" if checkpoint.active else ""
         period_label = (f" · Περίοδος: {self.dates.start or 'αρχή'} — {self.dates.end or 'τέλος'}"
@@ -409,14 +435,6 @@ class App:
             api = DemoAPI()
         else:
             environment = Environment[client.environment.upper()]
-            if not messagebox.askyesno("Επιβεβαίωση σύνδεσης ΑΑΔΕ",
-                f"Θα γίνουν πραγματικά, μόνο αναγνωστικά αιτήματα στο {ENVIRONMENTS[client.environment]}.\n"
-                f"Πελάτης: {client.name} · ΑΦΜ: {client.vat}\n"
-                + (f"Περίοδος: {dates.start:%d/%m/%Y} — {dates.end:%d/%m/%Y}\n\n" if dates.period else "Όλες οι ημερομηνίες\n\n") +
-                "Θα χρησιμοποιηθούν τα αποθηκευμένα credentials του πελάτη. "
-                "Η άντληση γίνεται απευθείας με RequestDocs, χωρίς προηγούμενη κλήση ελέγχου εξουσιοδότησης. Συνέχεια;",
-                parent=self.root):
-                return
             api = None
         self.cancel.clear()
         client_id = client.id
@@ -439,9 +457,31 @@ class App:
             self._display(view)
             label = "Διακόπηκε με ασφάλεια" if result.cancelled else "Ο συγχρονισμός ολοκληρώθηκε"
             self._message(f"{label} · Σελίδες: {result.pages} · Εγγραφές που επεξεργάστηκαν: {result.records}. "
-                            "Δεν έγινε λήψη ή επαλήθευση PDF.")
+                            "Η λίστα είναι έτοιμη. Συνεχίστε με Λήψη PDF.")
         self._submit(work, done)
         self.stop_button.configure(state="normal")
+
+    def _previous_month(self):
+        dates=previous_month()
+        self.date_from.set(dates.start.strftime('%d/%m/%Y'))
+        self.date_to.set(dates.end.strftime('%d/%m/%Y'))
+        self._apply_dates()
+
+    def _choose_destination(self):
+        if self.busy or not self.selected:
+            return
+        folder=filedialog.askdirectory(title="Φάκελος αποθήκευσης PDF",parent=self.root)
+        if folder:
+            self.download_roots[self.selected]=folder
+
+    def _confirm_browser_pdf(self,row,path):
+        event=threading.Event()
+        reply=[]
+        self.queue.put(("confirm_pdf",(row,path,event,reply)))
+        while not event.wait(0.1):
+            if self.cancel.is_set() or self.closed:
+                return False
+        return bool(reply and reply[0])
 
     def _apply_dates(self):
         if self.busy:
@@ -530,16 +570,26 @@ class App:
             self._message(str(error), error=True)
             return
         self.offset = 0
-        destination = filedialog.askdirectory(title="Επιλέξτε φάκελο αποθήκευσης PDF", parent=self.root)
+        destination = self.download_roots.get(self.selected)
+        if not destination:
+            destination = filedialog.askdirectory(title="Επιλέξτε φάκελο αποθήκευσης PDF",parent=self.root)
         if not destination:
             return
+        self.download_roots[self.selected]=destination
+        if browser and not self.browser_download_folder:
+            initial=Path.home()/"Downloads"
+            self.browser_download_folder=filedialog.askdirectory(
+                title="Πού αποθηκεύει ο browser τα PDF; Επιλέξτε τον φάκελο Λήψεις",
+                initialdir=str(initial if initial.is_dir() else Path.home()),parent=self.root)
+            if not self.browser_download_folder:
+                return
         client = self.clients[self.selected]
         self.cancel.clear()
         def work():
             self.operation_stage = "pdf"
             notice = lambda message: self.queue.put(("browser_notice", message))
-            downloader = (BrowserPDFDownloader(self.db, notice=notice) if browser else
-                          AutomaticPDFDownloader(self.db, direct=PDFDownloader(self.db), notice=notice))
+            downloader = (InteractivePDFDownloader(self.db,self.browser_download_folder,notice=notice,confirm=self._confirm_browser_pdf)
+                          if browser else AutomaticPDFDownloader(self.db,direct=PDFDownloader(self.db),notice=notice))
             result = downloader.run(client, destination, self.cancel,
                 lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
             return result, self._view(client.id, self.offset)
@@ -549,7 +599,7 @@ class App:
             label = "Η λήψη διακόπηκε" if result['cancelled'] else "Η λήψη ολοκληρώθηκε"
             reasons = " · ".join(f"{state_label(state)}: {count}" for state, count in sorted(result['reasons'].items()))
             message = (f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
-                       f"Εκκρεμή: {result['pending']}. Φάκελος: {destination}.")
+                       f"Εκκρεμή σε αυτή την εργασία: {result['pending']}. Φάκελος: {destination}.")
             if reasons:
                 message += f" Αιτίες: {reasons}."
             self._message(message)

@@ -19,7 +19,12 @@ from .models import ApplicationError
 from .provider_documents import MAX_DESCRIPTOR_BYTES, ResolutionError, resolve_document
 
 MAX_BYTES = 40 * 1024 * 1024
+INTERACTIVE_STATES = {'challenge','http_403','browser_required','browser_timeout','browser_closed',
+    'browser_download_failed','browser_confirmation','html_page','descriptor_limit','invalid_descriptor','ambiguous_document','browser_unavailable'}
+
 LABELS = {
+    'browser_confirmation': 'Εκκρεμεί: δεν επιβεβαιώθηκε νέο PDF από τον browser',
+    'challenge': 'Εκκρεμεί για δεύτερο πέρασμα: Cloudflare / CAPTCHA',
     'browser_unavailable': 'Εκκρεμεί: χρειάζεται εγκατάσταση/έλεγχος browser (INSTALL_BROWSER.bat)',
     'browser_required': 'Εκκρεμεί: χρειάζεται φόρτωση στον browser',
     'browser_timeout': 'Εκκρεμεί: ο browser δεν παρέδωσε PDF εγκαίρως',
@@ -30,7 +35,6 @@ LABELS = {
     'invalid_descriptor': 'Εκκρεμεί: μη έγκυρο JSON παρόχου',
     'imported_unverified': 'PDF αποθηκευμένο (εισαγωγή)',
     'saved_unverified': 'PDF αποθηκευμένο',
-    'challenge': 'Εκκρεμεί: προστασία παρόχου / CAPTCHA',
     'html_page': 'Εκκρεμεί: ο σύνδεσμος επιστρέφει ιστοσελίδα',
     'http_error': 'Εκκρεμεί: απόρριψη από πάροχο',
     'invalid_pdf': 'Εκκρεμεί: μη έγκυρο ή κρυπτογραφημένο PDF',
@@ -199,8 +203,11 @@ class PDFDownloader:
         self.db = database
         self.opener = opener or build_opener(SafeRedirect())
 
+    def _candidates(self, client_id, dates=None):
+        return self.db.download_candidates(client_id,dates)
+
     def run(self, client, destination, cancel, progress=lambda done, total: None, dates=None):
-        rows = self.db.download_candidates(client.id, dates)
+        rows = self._candidates(client.id, dates)
         result = dict(saved=0, skipped=0, pending=0, cancelled=False, reasons=Counter())
         for index, row in enumerate(rows):
             if cancel.is_set():
@@ -342,3 +349,31 @@ class PDFDownloader:
         finally:
             if temporary:
                 temporary.unlink(missing_ok=True)
+
+
+def archive_pdf_bytes(data, client, row, root, cancel):
+    if len(data) > MAX_BYTES:
+        raise Pending('too_large')
+    if not data.startswith(b'%PDF-'):
+        raise Pending('invalid_pdf')
+    temporary = None
+    try:
+        folder = archive_folder(root, client, row)
+        with tempfile.NamedTemporaryFile(dir=folder,suffix='.part',delete=False) as stream:
+            temporary = Path(stream.name)
+            for offset in range(0,len(data),65536):
+                if cancel.is_set():
+                    return None
+                stream.write(data[offset:offset+65536])
+            stream.flush()
+            os.fsync(stream.fileno())
+        if not valid_pdf(temporary):
+            raise Pending('invalid_pdf')
+        checksum = digest_file(temporary)
+        final = publish_pdf(temporary,folder,row['mark'],cancel)
+        return (final,checksum,len(data)) if final else None
+    except OSError:
+        raise Pending('storage_error') from None
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
