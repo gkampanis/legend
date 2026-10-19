@@ -230,7 +230,7 @@ class GUITests(unittest.TestCase):
                 with patch('myinvoices.gui.filedialog.askopenfilename',return_value=str(source)), patch('myinvoices.gui.messagebox.askyesno',return_value=True), patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')):
                     app.import_button.invoke()
                     wait()
-                self.assertIn('PDF από browser',app.document_tree.item('101','values')[-1])
+                self.assertIn('PDF αποθηκευμένο',app.document_tree.item('101','values')[-1])
                 self.assertEqual(source.read_bytes(),stream.getvalue())
                 with patch('myinvoices.gui.filedialog.askdirectory',return_value=str(folder/'archive')), patch('myinvoices.gui.PDFDownloader',side_effect=lambda database: PDFDownloader(database,Opener(stream.getvalue()))):
                     app.pdf_button.invoke()

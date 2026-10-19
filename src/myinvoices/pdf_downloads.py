@@ -1,5 +1,4 @@
 """Direct provider PDFs. No AADE credentials, challenge solving or URL guessing."""
-from datetime import date
 import io
 import hashlib
 from collections import Counter
@@ -21,6 +20,7 @@ from .provider_documents import MAX_DESCRIPTOR_BYTES, ResolutionError, resolve_d
 
 MAX_BYTES = 40 * 1024 * 1024
 LABELS = {
+    'browser_unavailable': 'Εκκρεμεί: χρειάζεται εγκατάσταση/έλεγχος browser (INSTALL_BROWSER.bat)',
     'browser_required': 'Εκκρεμεί: χρειάζεται φόρτωση στον browser',
     'browser_timeout': 'Εκκρεμεί: ο browser δεν παρέδωσε PDF εγκαίρως',
     'browser_download_failed': 'Εκκρεμεί: απέτυχε το download στον browser',
@@ -28,8 +28,8 @@ LABELS = {
     'ambiguous_document': 'Εκκρεμεί: περισσότερα από ένα πιθανά PDF',
     'descriptor_limit': 'Εκκρεμεί: μεγάλη ή σύνθετη σελίδα/JSON',
     'invalid_descriptor': 'Εκκρεμεί: μη έγκυρο JSON παρόχου',
-    'imported_unverified': 'PDF από browser — προς έλεγχο',
-    'saved_unverified': 'PDF αποθηκευμένο — προς έλεγχο',
+    'imported_unverified': 'PDF αποθηκευμένο (εισαγωγή)',
+    'saved_unverified': 'PDF αποθηκευμένο',
     'challenge': 'Εκκρεμεί: προστασία παρόχου / CAPTCHA',
     'html_page': 'Εκκρεμεί: ο σύνδεσμος επιστρέφει ιστοσελίδα',
     'http_error': 'Εκκρεμεί: απόρριψη από πάροχο',
@@ -59,24 +59,25 @@ def open_provider(database, client, mark, browser=None):
         raise ApplicationError('Δεν άνοιξε ο browser. Ελέγξτε τον προεπιλεγμένο browser των Windows.')
 
 
-def review_folder(root, client, row):
-    try:
-        issued = date.fromisoformat(row['issue_date'])
-        year, month = str(issued.year), f'{issued.month:02}'
-    except ValueError:
-        year, month = 'Αγνωστη_ημερομηνία', '00'
+def archive_folder(root, client, row):
     supplier = ''.join(c for c in (row['issuer_vat'] or '') if c.isascii() and c.isalnum())[:32] or 'Αγνωστος'
-    folder = Path(root) / f'{client.vat}_{client.environment}' / 'ΠΡΟΣ_ΕΛΕΓΧΟ' / year / month / supplier
+    client_folder = client.vat if client.environment == 'production' else f'{client.vat}_ΔΟΚΙΜΑΣΤΙΚΟ'
+    folder = Path(root) / client_folder / supplier
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
 def publish_pdf(temporary, folder, mark, cancel):
-    final = folder / f'{mark}_{uuid.uuid4().hex}.pdf'
+    final = folder / f'{mark}.pdf'
     created = False
     interrupted = False
     try:
-        with final.open('xb') as target:
+        try:
+            target_stream = final.open('xb')
+        except FileExistsError:
+            final = folder / f'{mark}_{uuid.uuid4().hex}.pdf'
+            target_stream = final.open('xb')
+        with target_stream as target:
             created = True
             with temporary.open('rb') as source:
                 while chunk := source.read(65536):
@@ -104,7 +105,7 @@ def import_browser_pdf(database, client, mark, source, destination, cancel):
         raise ApplicationError('Επιλέξτε ένα τοπικό αρχείο PDF, όχι σύνδεσμο ή φάκελο.')
     temporary = final = None
     try:
-        folder = review_folder(destination, client, row)
+        folder = archive_folder(destination, client, row)
         with source.open('rb') as original, tempfile.NamedTemporaryFile(dir=folder, suffix='.part', delete=False) as target:
             temporary = Path(target.name)
             size = 0
@@ -170,7 +171,7 @@ class SafeRedirect(HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         validate_url(newurl)
-        return Request(newurl, headers={'Accept': 'application/pdf', 'User-Agent': 'myInvoices/0.6'})
+        return Request(newurl, headers={'Accept': 'application/pdf', 'User-Agent': 'myInvoices/0.7'})
 
 
 def valid_pdf(path):
@@ -247,7 +248,7 @@ class PDFDownloader:
             visited.add(url)
             validate_url(url)
             request = Request(url, headers={'Accept': 'application/pdf, application/json, text/html;q=0.8',
-                                           'User-Agent': 'myInvoices/0.6'})
+                                           'User-Agent': 'myInvoices/0.7'})
             try:
                 response = self.opener.open(request, timeout=30)
             except HTTPError as error:
@@ -305,7 +306,7 @@ class PDFDownloader:
                 return None
             response, prefix = opened
             with response:
-                folder = review_folder(root, client, row)
+                folder = archive_folder(root, client, row)
                 with tempfile.NamedTemporaryFile(dir=folder, suffix='.part', delete=False) as stream:
                     temporary = Path(stream.name)
                     size = 0

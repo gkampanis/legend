@@ -17,6 +17,7 @@ from .sync import Synchronizer
 from .pdf_downloads import PDFDownloader, state_label, open_provider, import_browser_pdf
 from .date_range import DateRange
 from .browser_downloads import BrowserPDFDownloader
+from .automatic_downloads import AutomaticPDFDownloader
 
 
 STATUS = {"url_available": "Υπάρχει link — PDF ανεξέλεγκτο", "no_url": "Χωρίς link PDF"}
@@ -49,7 +50,7 @@ class App:
         self.operation_stage = "local"
         self.status = tk.StringVar(value="Έτοιμο")
         self.summary = tk.StringVar(value="Επιλέξτε πελάτη")
-        root.title("myInvoices Starter 0.6.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
+        root.title("myInvoices Starter 0.7.0 — " + ("OFFLINE DEMO" if demo else "Στοιχεία πελατών / ΑΑΔΕ"))
         root.geometry("1280x860")
         root.minsize(1020, 720)
         self._build()
@@ -94,7 +95,7 @@ class App:
         ttk.Label(outer, text="Τα API credentials και το περιβάλλον ορίζονται στα στοιχεία κάθε πελάτη.").pack(anchor="w", pady=10)
         pdf_bar = ttk.Frame(outer)
         pdf_bar.pack(fill="x", pady=(0, 8))
-        self.pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF περιόδου", command=self._download_pdfs)
+        self.pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF", command=self._download_pdfs)
         self.pdf_button.pack(side="left")
         self.browser_pdf_button = ttk.Button(pdf_bar, text="Λήψη PDF μέσω browser", command=lambda: self._download_pdfs(browser=True))
         self.browser_pdf_button.pack(side="left", padx=6)
@@ -536,8 +537,9 @@ class App:
         self.cancel.clear()
         def work():
             self.operation_stage = "pdf"
-            downloader = (BrowserPDFDownloader(self.db, notice=lambda message: self.queue.put(("browser_notice", message)))
-                          if browser else PDFDownloader(self.db))
+            notice = lambda message: self.queue.put(("browser_notice", message))
+            downloader = (BrowserPDFDownloader(self.db, notice=notice) if browser else
+                          AutomaticPDFDownloader(self.db, direct=PDFDownloader(self.db), notice=notice))
             result = downloader.run(client, destination, self.cancel,
                 lambda done, total: self.queue.put(("pdf_progress", (done, total))), dates=self.dates)
             return result, self._view(client.id, self.offset)
@@ -546,13 +548,11 @@ class App:
             self._display(view)
             label = "Η λήψη διακόπηκε" if result['cancelled'] else "Η λήψη ολοκληρώθηκε"
             reasons = " · ".join(f"{state_label(state)}: {count}" for state, count in sorted(result['reasons'].items()))
-            self._message(f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
-                f"Εκκρεμή: {result['pending']}. Φάκελος: {destination}. "
-                "Τα PDF είναι ΠΡΟΣ_ΕΛΕΓΧΟ: δεν έχει επαληθευτεί η ταυτότητα του παραστατικού. "
-                + (f" Αιτίες: {reasons}." if reasons else "") +
-                " Για ιστοσελίδες δοκιμάστε Λήψη PDF μέσω browser. "
-                "Ολοκληρώστε τυχόν έλεγχο στο παράθυρο που ανοίγει· η εφαρμογή παραλαμβάνει το PDF όταν φορτωθεί. "
-                "Η χειροκίνητη εισαγωγή παραμένει διαθέσιμη.")
+            message = (f"{label} · Νέα PDF: {result['saved']} · Ήδη αποθηκευμένα: {result['skipped']} · "
+                       f"Εκκρεμή: {result['pending']}. Φάκελος: {destination}.")
+            if reasons:
+                message += f" Αιτίες: {reasons}."
+            self._message(message)
         self._submit(work, done)
         self.stop_button.configure(state="normal")
 

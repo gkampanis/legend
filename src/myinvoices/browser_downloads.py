@@ -1,6 +1,6 @@
 """Visible browser document capture. No stealth, CAPTCHA clicks or guessed API paths."""
 import asyncio
-from contextlib import suppress
+from contextlib import suppress, contextmanager
 import os
 from pathlib import Path
 import shutil
@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, unquote, urldefrag
 from urllib.request import getproxies
 
 from .models import ApplicationError
-from .pdf_downloads import (PDFDownloader, Pending, MAX_BYTES, validate_url, review_folder,
+from .pdf_downloads import (PDFDownloader, Pending, MAX_BYTES, validate_url, archive_folder,
                             valid_pdf, digest_file, publish_pdf)
 from .provider_documents import decode_pdf_data, ResolutionError
 
@@ -54,6 +54,12 @@ class BrowserPDFDownloader(PDFDownloader):
         # No browser installation/startup is needed when there are no candidate links.
         if not self.db.download_candidates(client.id, dates):
             return super().run(client, destination, cancel, progress, dates)
+        with self.session():
+            return super().run(client, destination, cancel, progress, dates)
+
+    @contextmanager
+    def session(self):
+        """Share a temporary browser across one batch, including lazy fallback calls."""
         try:
             import playwright.async_api  # noqa: F401
         except ImportError:
@@ -62,7 +68,7 @@ class BrowserPDFDownloader(PDFDownloader):
             self.runner = runner
             try:
                 runner.run(self._start())
-                return super().run(client, destination, cancel, progress, dates)
+                yield self
             finally:
                 runner.run(self._close())
 
@@ -116,7 +122,7 @@ class BrowserPDFDownloader(PDFDownloader):
             raise Pending('invalid_pdf')
         temporary = None
         try:
-            folder = review_folder(root, client, row)
+            folder = archive_folder(root, client, row)
             with tempfile.NamedTemporaryFile(dir=folder,suffix='.part',delete=False) as stream:
                 temporary = Path(stream.name)
                 for offset in range(0,len(data),65536):
@@ -148,7 +154,7 @@ class BrowserPDFDownloader(PDFDownloader):
                     raise Pending(error.state) from None
                 return self._archive(data,client,row,root,cancel)
             validate_url(url[5:] if url.startswith('blob:') else url)
-            folder = review_folder(root,client,row)
+            folder = archive_folder(root,client,row)
             with tempfile.NamedTemporaryFile(dir=folder,suffix='.part',delete=False) as stream:
                 temporary = Path(stream.name)
             task = asyncio.create_task(download.save_as(temporary))
