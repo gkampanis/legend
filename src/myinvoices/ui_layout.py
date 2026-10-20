@@ -20,8 +20,6 @@ def build(app):
     menu.add_cascade(label='Πελάτης',menu=clients)
     tools=tk.Menu(menu,tearoff=False)
     for label,command in [('Έλεγχος σύνδεσης API',app._check_api),('Άνοιγμα συνδέσμου στον προσωπικό browser',app._open_provider),('Χειροκίνητη εισαγωγή PDF…',app._import_pdf),('Επιλογή φακέλου PDF…',app._choose_destination),('Προηγούμενος μήνας',app._previous_month),('Όλες οι ημερομηνίες',app._clear_dates),('Αποθήκευση διάταξης',app._save_preferences),('Διαχείριση πελάτη…',app._manage_client),('Backup και έλεγχος επαναφοράς…',app._backup_window),('Εξαγωγή τεχνικής αναφοράς…',app._technical_report)]:tools.add_command(label=label,command=command)
-    from .entersoft.ui import open_extension
-    tools.add_command(label='Entersoft EBS — προετοιμασία (πρόσθετη λειτουργία)…',command=lambda:open_extension(app))
     menu.add_cascade(label='Περισσότερα',menu=tools);app.main_menu=menu
     app.messages_menu=tk.Menu(menu,tearoff=False)
     app.messages_menu.add_command(label='Αντιγραφή τελευταίου σφάλματος',command=app._copy_error,state='disabled')
