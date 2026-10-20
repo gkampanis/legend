@@ -8,7 +8,7 @@ import traceback
 
 def record_failure(path, error, stage):
     from .xml_parser import DIAGNOSTIC_ROOTS
-    allowed_stages = {"local", "credentials", "request", "xml", "database", "gui"}
+    allowed_stages = {"local", "credentials", "request", "xml", "database", "gui", "pdf", "pdf_import", "backup", "export"}
     entry = {
         "at": datetime.now(timezone.utc).isoformat(),
         "stage": stage if stage in allowed_stages else "local",

@@ -257,10 +257,17 @@ class PDFDownloader:
     def run(self, client, destination, cancel, progress=lambda done, total: None, dates=None):
         rows = self._candidates(client.id, dates)
         result = dict(saved=0, printed=0, skipped=0, pending=0, cancelled=False, reasons=Counter())
+        from .batch import BatchProgress
+        def emit(stage, done, mark=None):
+            observer = getattr(self, 'observer', None)
+            if observer:
+                observer(BatchProgress(stage,done,len(rows),mark,result['saved'],result['printed'],result['pending'],result['skipped']))
+        emit('Προετοιμασία PDF', 0)
         for index, row in enumerate(rows):
             if cancel.is_set():
                 result['cancelled'] = True
                 break
+            emit('Ανάκτηση PDF', index, row['mark'])
             source_hash = hashlib.sha256(row['download_url'].encode()).hexdigest()
             old = self.db.saved_pdf(client.id, row['mark'], source_hash)
             if old:
@@ -269,6 +276,7 @@ class PDFDownloader:
                 try:
                     if not path.is_symlink() and path.stat().st_size == old['byte_count'] and digest_file(path) == old['sha256']:
                         result['skipped'] += 1
+                        emit('Έλεγχος αρχείου', index + 1, row['mark'])
                         progress(index + 1, len(rows))
                         continue
                 except FileNotFoundError:
@@ -298,7 +306,9 @@ class PDFDownloader:
                 if output:
                     output[0].unlink(missing_ok=True)
                 raise
+            emit('Ολοκλήρωση παραστατικού', index + 1, row['mark'])
             progress(index + 1, len(rows))
+        emit('Διακόπηκε' if result['cancelled'] else 'Ολοκληρώθηκε', result['saved']+result['pending']+result['skipped'])
         return result
 
     def _open_document(self, url, cancel):
