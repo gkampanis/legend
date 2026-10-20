@@ -9,3 +9,6 @@ dist/
 *.dpapi
 credentials/
 diagnostics.jsonl
+*.spec
+ui-settings.json
+batches.jsonl
