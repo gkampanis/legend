@@ -198,3 +198,12 @@ async def print_invoice_page(page, client, invoice, root, cancel):
         if cancel.is_set():
             return None
         raise Pending('print_failed') from None
+
+
+# Public browser-integration contract. Private names remain for compatibility
+# with the original print pipeline and its regression tests.
+INVOICE_SNAPSHOT = _SNAPSHOT
+check_invoice_page = _guard
+await_browser_operation = _bounded
+PrintCancelled = _PrintCancelled
+pdf_matches_invoice = _valid_print

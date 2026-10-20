@@ -248,6 +248,13 @@ class BrowserRecoveryIntegrationTests(unittest.TestCase):
         service.run(other,self.root/'archive',threading.Event())
         self.assertEqual(self.cookie_checks,[False,True,False])
         self.assertNotEqual(original_profile,service.profile_directory)
+        production=self.db.add_client('Same VAT production','000000000','production')
+        self.db.commit_page(self.db.checkpoint(production.id),parse_response(xml_page([xml_invoice(202,recipient=production.vat)])))
+        source=hashlib.sha256(self.db.invoice(production.id,202)['download_url'].encode()).hexdigest()
+        self.db.record_pdf(production.id,202,'html_page',source)
+        service.run(production,self.root/'archive',threading.Event())
+        self.assertEqual(self.cookie_checks,[False,True,False,False])
+        self.assertNotEqual(original_profile,service.profile_directory)
 
     def test_print_button_popup_is_captured(self):
         result=self.service('popup').run(self.client,self.root/'archive',threading.Event())

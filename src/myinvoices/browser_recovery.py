@@ -11,8 +11,8 @@ from .browser_downloads import (BrowserPDFDownloader, VIEWER_SNAPSHOT,
 from .models import ApplicationError
 from .pdf_downloads import PDFDownloader, Pending, MAX_BYTES, validate_url
 from .provider_documents import decode_pdf_data, ResolutionError
-from .print_fallback import (_SNAPSHOT, _guard, _bounded, _PrintCancelled,
-                             _valid_print, print_invoice_page)
+from .print_fallback import (INVOICE_SNAPSHOT, check_invoice_page, await_browser_operation, PrintCancelled,
+                             pdf_matches_invoice, print_invoice_page)
 
 PRINT_LABELS=re.compile(r'^\s*(?:Εκτ[υύ]πωση(?: παραστατικού)?|Print(?: invoice| document)?|Λ[ηή]ψη PDF|Download PDF)\s*$',re.I)
 
@@ -65,13 +65,14 @@ SERIALIZE_FRAME="""(fallback) => {
 
 
 class RecoveryPDFDownloader(BrowserPDFDownloader):
-    def __init__(self,database,*,notice=lambda message:None,timeout=120,headless=False,marks=None):
+    def __init__(self,database,*,notice=lambda message:None,timeout=120,headless=False,marks=None,table=None):
         super().__init__(database,notice=notice,timeout=timeout,headless=headless,allow_print=True)
         self.profile_directory=None
+        self.table=table
         self.marks=None if marks is None else frozenset(int(mark) for mark in marks)
 
     def _candidates(self,client_id,dates=None):
-        rows=self.db.failed_download_candidates(client_id,dates)
+        rows=self.db.failed_download_candidates(client_id,dates,self.table)
         return rows if self.marks is None else [row for row in rows if row['mark'] in self.marks]
 
     def run(self,client,destination,cancel,progress=lambda done,total:None,dates=None):
@@ -119,7 +120,7 @@ class RecoveryPDFDownloader(BrowserPDFDownloader):
         invoice=self.db.invoice(client.id,row['mark'])
         async def wait(awaitable):
             try:
-                return await _bounded(awaitable,cancel,deadline)
+                return await await_browser_operation(awaitable,cancel,deadline)
             except Pending:
                 raise Pending(last_state) from None
         def track(owner):
@@ -169,7 +170,7 @@ class RecoveryPDFDownloader(BrowserPDFDownloader):
         self.notice(f"Ανάκτηση MARK {row['mark']}: ολοκληρώστε τυχόν έλεγχο στον ορατό browser. "
                     'Η εφαρμογή θα παραλάβει ή θα εκτυπώσει το παραστατικό. Η Διακοπή ή το κλείσιμο του browser σταματά την παρτίδα.')
         def archive(data,owner):
-            if owner is not page and not _valid_print(data,client,invoice):
+            if owner is not page and not pdf_matches_invoice(data,client,invoice):
                 raise Pending('recovery_pdf_mismatch')
             return self._archive(data,client,row,root,cancel)
         try:
@@ -188,7 +189,7 @@ class RecoveryPDFDownloader(BrowserPDFDownloader):
                 if downloads:
                     owner,download=downloads[0]
                     output=await self._download_event(download,client,row,root,cancel,deadline)
-                    if output and owner is not page and not _valid_print(output[0].read_bytes(),client,invoice):
+                    if output and owner is not page and not pdf_matches_invoice(output[0].read_bytes(),client,invoice):
                         output[0].unlink(missing_ok=True)
                         raise Pending('recovery_pdf_mismatch')
                     return output
@@ -223,9 +224,9 @@ class RecoveryPDFDownloader(BrowserPDFDownloader):
                                 try: data=decode_pdf_data(snapshot['encoded'])
                                 except ResolutionError as error: raise Pending(error.state) from None
                                 if not any(data==old[0] for old in embedded): embedded.append((data,owner))
-                            screen=await wait(frame.evaluate(_SNAPSHOT))
+                            screen=await wait(frame.evaluate(INVOICE_SNAPSHOT))
                             try:
-                                _guard(screen,client,invoice)
+                                check_invoice_page(screen,client,invoice)
                             except Pending as error:
                                 if error.state=='challenge':last_state='recovery_challenge'
                                 continue
@@ -284,7 +285,7 @@ class RecoveryPDFDownloader(BrowserPDFDownloader):
                         print_after=time.monotonic()+1
                 await wait(asyncio.sleep(0.2))
             raise Pending(last_state)
-        except _PrintCancelled:
+        except PrintCancelled:
             return None
         except Error:
             if cancel.is_set() or not any(not p.is_closed() for p in pages):return None

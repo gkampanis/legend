@@ -127,6 +127,8 @@ class Database:
         conn.create_function("source_digest", 1,
                              lambda value: hashlib.sha256((value or "").encode()).hexdigest(),
                              deterministic=True)
+        from .presentation import reason_group
+        conn.create_function('reason_group', 2, reason_group, deterministic=True)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=FULL")
         try:
@@ -333,18 +335,45 @@ class Database:
             return " WHERE pdf_attempted=1 AND pdf_saved=0 AND cancelled=0"
         raise ApplicationError("Μη έγκυρη λίστα παραστατικών.")
 
-    def invoices(self, client_id, offset=0, limit=200, dates=None, bucket="all"):
-        query, values = self._invoice_scope(client_id, dates)
-        query = "SELECT * FROM (" + query + ")" + self._bucket_clause(bucket)
+    def _table_scope(self, client_id, dates=None, bucket="all", table=None):
+        from .presentation import TableQuery
+        table = table or TableQuery()
+        source, values = self._invoice_scope(client_id, dates)
+        bucket_clause = self._bucket_clause(bucket)
+        clauses, extra = table.conditions()
+        query = "SELECT * FROM (" + source + ")" + bucket_clause
+        if clauses:
+            query += (" AND " if bucket_clause else " WHERE ") + " AND ".join(clauses)
+        return query, (*values, *extra), table
+
+    def invoices(self, client_id, offset=0, limit=200, dates=None, bucket="all", table=None):
+        query, values, table = self._table_scope(client_id, dates, bucket, table)
         with self.connection() as conn:
             return [dict(r) for r in conn.execute(
-                query + " ORDER BY issue_date DESC,mark DESC LIMIT ? OFFSET ?",
-                (*values, limit, offset))]
+                query + " ORDER BY " + table.order() + " LIMIT ? OFFSET ?", (*values, limit, offset))]
 
-    def count(self, client_id, dates=None, bucket="all"):
-        query, values = self._invoice_scope(client_id, dates)
+    def count(self, client_id, dates=None, bucket="all", table=None):
+        query, values, _ = self._table_scope(client_id, dates, bucket, table)
         with self.connection() as conn:
-            return conn.execute("SELECT count(*) FROM (" + query + ")" + self._bucket_clause(bucket), values).fetchone()[0]
+            return conn.execute("SELECT count(*) FROM (" + query + ")", values).fetchone()[0]
+
+    def export_rows(self, client_id, dates=None, bucket="all", table=None):
+        # Streaming cursor: exports do not load every invoice/XML into memory.
+        query, values, table = self._table_scope(client_id, dates, bucket, table)
+        with self.connection() as conn:
+            for row in conn.execute(query + " ORDER BY " + table.order(), values):
+                yield dict(row)
+
+    def invoice_details(self, client_id, mark):
+        query, values = self._invoice_scope(client_id)
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM ("+query+") WHERE mark=?", (*values, mark)).fetchone()
+            if row is None:
+                raise ApplicationError('Το παραστατικό δεν βρέθηκε.')
+            attempts = [dict(r) for r in conn.execute(
+                'SELECT state,at FROM pdf_attempts WHERE client_id=? AND mark=? ORDER BY id DESC LIMIT 20', (client_id,mark))]
+            count = conn.execute('SELECT count(*) FROM pdf_attempts WHERE client_id=? AND mark=?', (client_id,mark)).fetchone()[0]
+            return dict(row), count, attempts
 
     def changes(self, client_id, limit=200):
         with self.connection() as conn:
@@ -368,12 +397,15 @@ class Database:
             return [dict(r) for r in conn.execute("""SELECT mark,issue_date,issuer_vat,download_url,
                 pdf_state,pdf_source_hash FROM (""" + query + ") WHERE download_url IS NOT NULL AND cancelled=0 ORDER BY mark", values)]
 
-    def failed_download_candidates(self, client_id, dates=None):
-        query,values=self._invoice_scope(client_id,dates)
+    def failed_download_candidates(self, client_id, dates=None, table=None):
+        query,values,_=self._table_scope(client_id,dates,'failure',table)
         with self.connection() as conn:
-            return [dict(r) for r in conn.execute('''SELECT mark,issue_date,issuer_vat,download_url,
-                pdf_state,pdf_source_hash FROM ('''+query+''') WHERE pdf_attempted=1 AND pdf_saved=0
-                AND cancelled=0 AND download_url IS NOT NULL ORDER BY mark''',values)]
+            return [dict(r) for r in conn.execute("SELECT mark,issue_date,issuer_vat,download_url,pdf_state,pdf_source_hash FROM ("+query+") WHERE download_url IS NOT NULL ORDER BY mark",values)]
+
+    def recovery_count(self, client_id, dates=None, table=None):
+        query,values,_=self._table_scope(client_id,dates,'failure',table)
+        with self.connection() as conn:
+            return conn.execute("SELECT count(*) FROM ("+query+") WHERE download_url IS NOT NULL",values).fetchone()[0]
 
     def saved_pdf(self, client_id, mark, source_hash):
         from .pdf_downloads import SAVED_STATES

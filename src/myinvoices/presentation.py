@@ -92,6 +92,8 @@ class TableQuery:
         if self.reason in ReasonGroup._value2member_map_:
             clauses.append('reason_group(pdf_state,download_url IS NOT NULL)=?')
             values.append(self.reason)
+            if self.reason == ReasonGroup.OTHER.value:
+                clauses.append('pdf_attempted=1')
         if self.provenance in PROVENANCE:
             clauses.append('pdf_state=?'); values.append(self.provenance)
         status = {'saved':'pdf_saved=1','failed':'pdf_attempted=1 AND pdf_saved=0 AND cancelled=0',

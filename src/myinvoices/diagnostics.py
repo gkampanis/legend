@@ -30,3 +30,34 @@ def record_failure(path, error, stage):
     except OSError:
         return False
     return True
+
+
+def export_report(directory,destination):
+    """Explicit support export: fixed metadata, no invoice/customer/path data."""
+    import platform
+    import sys
+    from . import __version__
+    records=[]
+    try:
+        with (Path(directory)/'diagnostics.jsonl').open('rb') as file:
+            file.seek(0,2);size=file.tell();file.seek(max(0,size-256*1024))
+            for line in file.read().decode('utf-8',errors='replace').splitlines():
+                try:
+                    source=json.loads(line)
+                    # Never copy arbitrary fields or exception text from an edited log.
+                    stage=source.get('stage')
+                    if stage not in {'local','credentials','request','xml','database','gui','pdf','pdf_import','backup','export'}:continue
+                    record={'stage':stage}
+                    status=source.get('http_status')
+                    if isinstance(status,int) and 100<=status<=599:record['http_status']=status
+                    records.append(record)
+                except (ValueError,AttributeError):continue
+    except OSError:pass
+    report=dict(application_version=__version__,python=f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}',
+                operating_system=platform.system(),diagnostics=records[-100:])
+    from .models import ApplicationError
+    try:
+        with Path(destination).open('x',encoding='utf-8') as file:json.dump(report,file,ensure_ascii=False,indent=2)
+    except OSError:
+        raise ApplicationError('Δεν γράφτηκε η τεχνική αναφορά. Επιλέξτε νέο όνομα αρχείου.') from None
+    return len(report['diagnostics'])

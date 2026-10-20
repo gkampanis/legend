@@ -257,7 +257,7 @@ class GUITests(unittest.TestCase):
             finally:
                 root.destroy()
 
-    def test_three_primary_steps_and_previous_month_default(self):
+    def test_two_primary_steps_contextual_browser_and_previous_month_default(self):
         import tkinter as tk
         from myinvoices.database import Database
         from myinvoices.gui import App
@@ -275,7 +275,7 @@ class GUITests(unittest.TestCase):
                 self.assertFalse(app.busy)
                 self.assertEqual((app.date_from.get(),app.date_to.get()),('01/09/2026','30/09/2026'))
                 self.assertEqual([button.cget('text') for button in (app.sync_button,app.pdf_button,app.browser_pdf_button)],
-                                 ['1. Εύρεση παραστατικών','2. Λήψη PDF','3. Άνοιγμα στον browser'])
+                                 ['1. Εύρεση παραστατικών','2. Λήψη PDF','Άνοιγμα συνδέσμου'])
                 self.assertEqual((app.stat_total.get(),app.stat_saved.get(),app.stat_pending.get()),('0','0','0'))
                 self.assertEqual(app.stop_button.winfo_manager(),'')
                 self.assertFalse(hasattr(app,'add_button'))

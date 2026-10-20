@@ -40,6 +40,16 @@ class DomainTests(unittest.TestCase):
             self.assertEqual([r['stage'] for r in records],['pdf','pdf_import','backup','export'])
             self.assertNotIn('SYNTHETIC-SECRET',path.read_text())
 
+    def test_support_export_keeps_pdf_stage_without_personal_values(self):
+        from myinvoices.diagnostics import export_report
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)
+            (path/'diagnostics.jsonl').write_text(json.dumps(dict(stage='pdf',http_status=403,url='SYNTHETIC-SECRET',exception_type='SYNTHETIC-SECRET'))+'\n')
+            self.assertEqual(export_report(path,path/'report.json'),1)
+            report=json.loads((path/'report.json').read_text())
+            self.assertEqual(report['diagnostics'],[{'stage':'pdf','http_status':403}])
+            self.assertNotIn('SYNTHETIC-SECRET',(path/'report.json').read_text())
+
     def test_unknown_total_is_explicit(self):
         self.assertIn('σύνολο άγνωστο',BatchProgress('ΑΑΔΕ',2,None).text())
 
